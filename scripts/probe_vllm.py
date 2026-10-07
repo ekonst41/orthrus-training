@@ -13,10 +13,12 @@ from pathlib import Path
 
 MODEL = "Qwen/Qwen3-0.6B"
 MAX_TOKENS = 1024
-# (engine kwargs, env overrides); the fallback avoids JIT-compiled FlashInfer and cudagraphs.
+# The DataSphere image ships nvcc 11.8, which cannot JIT-build FlashInfer's sampler (verified
+# 2026-10-08), so it is always disabled. (engine kwargs, env overrides) per attempt:
+NO_FLASHINFER_SAMPLER = {"VLLM_USE_FLASHINFER_SAMPLER": "0"}
 ATTEMPTS = {
-    "default": ({}, {}),
-    "conservative": ({"enforce_eager": True}, {"VLLM_USE_FLASHINFER_SAMPLER": "0"}),
+    "cudagraphs": ({}, NO_FLASHINFER_SAMPLER),
+    "eager": ({"enforce_eager": True}, NO_FLASHINFER_SAMPLER),
 }
 
 
