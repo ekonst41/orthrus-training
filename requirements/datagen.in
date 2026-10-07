@@ -1,0 +1,3 @@
+# Teacher-response generation with vLLM (Linux + CUDA only).
+-r train.in
+vllm==0.31.0

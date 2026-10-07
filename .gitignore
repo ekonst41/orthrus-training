@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Environments and secrets
+.venv/
+.env
+.env.*
+!.env.example
+
+# Data, checkpoints, logs (never committed; live in S3/HF/DataSphere)
+/data/
+/checkpoints/
+/outputs/
+/runs/
+/wandb/
+*.safetensors
+*.pt
+*.bin
+
+# DataSphere CLI logs and downloaded job files
+.ds_logs/

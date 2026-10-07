@@ -1,0 +1,5 @@
+# Local development on any OS (CPU only): unit tests with tiny models and the DataSphere CLI.
+-r train.in
+pytest
+ruff
+datasphere

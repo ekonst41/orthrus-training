@@ -1,0 +1,9 @@
+# Code runs on Linux (DataSphere, GPU servers): keep LF in the working tree
+# even on Windows checkouts, so uploaded shell scripts and configs stay valid.
+* text=auto eol=lf
+
+*.pyc binary
+*.pt binary
+*.safetensors binary
+*.png binary
+*.whl binary
