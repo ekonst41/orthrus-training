@@ -2,5 +2,7 @@
 # The PyPI vllm wheel targets CUDA 13 (driver >= 580); DataSphere has driver 535, so the exact
 # CUDA 12.9 wheel from the GitHub release is pinned. lock.py moves this URL line into
 # datagen-urls.txt (the DataSphere CLI rejects URL requirements); install it with --no-deps.
+# lock.py also drops vllm's torchcodec/torchaudio (no CUDA 12.9 builds matching torch 2.13;
+# a present-but-unloadable torchcodec crashes vllm at import, an absent one is skipped).
 -r train.in
 vllm @ https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl

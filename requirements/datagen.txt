@@ -1,5 +1,4 @@
 --extra-index-url https://download.pytorch.org/whl/cu129
-
 absl-py==2.5.0
 agent-detector==2.0.0
 aiohappyeyeballs==2.7.1
@@ -187,8 +186,6 @@ tokenspeed-mla==0.1.8
 tokenspeed-triton==3.8.10.post20260920
 torch==2.13.0+cu129
 torch-c-dlpack-ext==0.1.5
-torchaudio==2.11.0+cu129
-torchcodec==0.17.0
 torchvision==0.28.0+cu129
 tqdm==4.70.1
 transformers==5.17.0
