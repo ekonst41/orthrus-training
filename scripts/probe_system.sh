@@ -2,7 +2,8 @@
 # Host probe for a DataSphere job (or any GPU server): needs no Python packages.
 # Usage: bash scripts/probe_system.sh [report_path]
 set -u
-report="${1:-probe_system.txt}"
+report="${1:-outputs/probe_system.txt}"
+mkdir -p "$(dirname "$report")"
 
 section() { printf '\n===== %s =====\n' "$1"; }
 have() { command -v "$1" >/dev/null 2>&1; }

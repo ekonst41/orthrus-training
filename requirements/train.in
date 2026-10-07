@@ -1,12 +1,6 @@
 # Training and evaluation on CUDA GPUs (DataSphere jobs or any Linux GPU server).
-# Locked versions: requirements/train.txt (regenerate with the command in DEVELOPMENT.md).
-# Lower bounds stop the resolver from backtracking to ancient releases.
-torch==2.13.0         # same torch as vllm==0.31.0 (requirements/datagen.in)
-transformers==5.17.0  # vllm 0.31 requires transformers>=5.10.4,<5.18
-datasets>=5.0
-huggingface_hub>=1.30
-safetensors>=0.6
-pyyaml>=6.0
-numpy>=2.0
-tqdm>=4.66
-tensorboard>=2.19
+# DataSphere A100 hosts run NVIDIA driver 535 (CUDA 12.2): PyPI torch 2.13 is built for CUDA 13
+# (needs driver >= 580), so torch comes from the PyTorch CUDA 12.9 index (minor-version compatible).
+--extra-index-url https://download.pytorch.org/whl/cu129
+-r base.in
+torch==2.13.0+cu129  # same torch as vllm==0.31.0 (requirements/datagen.in)

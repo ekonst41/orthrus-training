@@ -112,7 +112,8 @@ def hub_download():
 
 
 def main():
-    report_path = sys.argv[1] if len(sys.argv) > 1 else "probe_gpu.json"
+    report_path = Path(sys.argv[1] if len(sys.argv) > 1 else "outputs/probe_gpu.json")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     assert torch.cuda.is_available(), "CUDA is not available"
     report = {}
     for name, check in [

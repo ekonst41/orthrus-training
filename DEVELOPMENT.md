@@ -25,17 +25,18 @@ uv pip sync requirements/dev.txt
 | `datagen.txt` | генерация ответов учителя через vLLM (Linux + CUDA) |
 | `dev.txt` | локальная разработка: CPU, тесты, линтер, DataSphere CLI |
 
-torch 2.13.0 + transformers 5.17.0 выбраны как общий стек с vLLM 0.31.
-После правки `.in` пересоберите lock-файлы:
+torch 2.13.0 + transformers 5.17.0 выбраны как общий стек с vLLM 0.31. На A100 в DataSphere стоит
+драйвер NVIDIA 535 (CUDA 12.2), а torch 2.13 с PyPI собран под CUDA 13 (нужен драйвер ≥580),
+поэтому для GPU torch берётся из индекса PyTorch cu129 (совместим с драйвером 535).
+
+После правки `.in` пересоберите lock-файлы (нужен uv):
 
 ```bash
-uv pip compile requirements/dev.in --universal --python-version 3.12 -o requirements/dev.txt
-uv pip compile requirements/train.in --python-version 3.12 --python-platform x86_64-manylinux_2_28 --no-header --no-annotate -o requirements/train.txt
-uv pip compile requirements/datagen.in --python-version 3.12 --python-platform x86_64-manylinux_2_28 --no-header --no-annotate -o requirements/datagen.txt
+python scripts/lock.py            # все; или: python scripts/lock.py train
 ```
 
-`--no-header --no-annotate` обязательны для `train.txt` и `datagen.txt`: DataSphere CLI отвергает
-файл зависимостей с комментариями и маркерами окружения.
+`train.txt` и `datagen.txt` пишутся без комментариев и без `--index-url`: DataSphere CLI отвергает
+их в файле зависимостей.
 
 На своём GPU-сервере: `pip install -r requirements/train.txt`.
 
@@ -68,6 +69,8 @@ Python задаётся вручную (Python 3.12 и `requirements/train.txt`)
 - на одно задание до 10 ГБ данных, один файл до 5 ГБ, через CLI скачивается до 1 ГБ результатов,
   поэтому чекпоинты и датасеты хранятся вне `outputs`;
 - хранилище проекта подключается к заданию только для чтения;
+- рабочий каталог задания `/job` — общий диск с ~34 ГБ свободного места (запись ~60 МБ/с),
+  поэтому данным и чекпоинтам нужен `working-storage` (от 100 ГБ, оплачивается);
 - данные задания (кеш, логи) хранятся 14 дней, файл лога до 100 МБ;
 - g2.1 (1×A100 80 ГБ) стоит ≈543 ₽/ч, тарификация посекундная.
 

@@ -14,6 +14,6 @@ env:
     local-paths:
       - scripts/probe_gpu.py
 outputs:
-  - probe_gpu.json: REPORT
+  - outputs/probe_gpu.json: REPORT
 cloud-instance-types:
   - g2.1

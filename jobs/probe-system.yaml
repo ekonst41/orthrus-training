@@ -7,6 +7,6 @@ cmd: timeout 50m bash scripts/probe_system.sh ${REPORT}
 inputs:
   - scripts/probe_system.sh
 outputs:
-  - probe_system.txt: REPORT
+  - outputs/probe_system.txt: REPORT
 cloud-instance-types:
   - g2.1

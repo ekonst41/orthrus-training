@@ -1,3 +1,3 @@
 # Teacher-response generation with vLLM (Linux + CUDA only).
 -r train.in
-vllm==0.31.0
+vllm==0.31.0  # PyPI build targets CUDA 13; DataSphere needs the +cu129 wheel from the GitHub release
