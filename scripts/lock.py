@@ -12,38 +12,21 @@ import sys
 from pathlib import Path
 
 REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements"
+COMMON = "--python-version 3.12 -q".split()
 # pip (used by DataSphere) picks the best version across all indexes; mirror that in uv.
-LINUX = [
-    "--python-platform",
-    "x86_64-manylinux_2_28",
-    "--no-header",
-    "--no-annotate",
-    "--index-strategy",
-    "unsafe-best-match",
-]
-TARGETS = {
-    "dev": ["--universal"],
-    "train": [*LINUX, "--emit-index-url"],
-    "datagen": [*LINUX, "--emit-index-url"],
-}
+LINUX = "--python-platform x86_64-manylinux_2_28 --index-strategy unsafe-best-match".split()
+CLEAN = "--no-header --no-annotate --emit-index-url".split()
+TARGETS = {"dev": ["--universal"], "train": LINUX + CLEAN, "datagen": LINUX + CLEAN}
 
 
 def lock(name: str) -> None:
-    command = [
-        "uv",
-        "pip",
-        "compile",
-        f"{name}.in",
-        "--python-version",
-        "3.12",
-        "-q",
-        *TARGETS[name],
-    ]
+    command = ["uv", "pip", "compile", f"{name}.in", *COMMON, *TARGETS[name]]
     result = subprocess.run(command, cwd=REQUIREMENTS, capture_output=True, text=True)
     if result.returncode != 0:
         sys.exit(f"{name}: {result.stderr}")
     lines = [line for line in result.stdout.splitlines() if not line.startswith("--index-url")]
-    (REQUIREMENTS / f"{name}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path = REQUIREMENTS / f"{name}.txt"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     pins = sum("==" in line and not line.lstrip().startswith("#") for line in lines)
     print(f"requirements/{name}.txt: {pins} pinned packages")
 
