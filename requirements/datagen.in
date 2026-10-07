@@ -1,3 +1,6 @@
 # Teacher-response generation with vLLM (Linux + CUDA only).
+# The PyPI vllm wheel targets CUDA 13 (driver >= 580); DataSphere has driver 535, so the exact
+# CUDA 12.9 wheel from the GitHub release is pinned. lock.py moves this URL line into
+# datagen-urls.txt (the DataSphere CLI rejects URL requirements); install it with --no-deps.
 -r train.in
-vllm==0.31.0  # PyPI build targets CUDA 13; DataSphere needs the +cu129 wheel from the GitHub release
+vllm @ https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl

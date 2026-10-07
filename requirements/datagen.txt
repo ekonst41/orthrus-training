@@ -90,14 +90,11 @@ ninja==1.13.2
 numba==0.65.0
 numpy==2.3.5
 nvidia-cublas-cu12==12.9.1.4
-nvidia-cuda-cccl==13.3.4.3.1
-nvidia-cuda-crt==13.4.92
+nvidia-cuda-cccl-cu12==12.9.27
 nvidia-cuda-cupti-cu12==12.9.79
-nvidia-cuda-nvcc==13.4.92
+nvidia-cuda-nvcc-cu12==12.9.86
 nvidia-cuda-nvdisasm==13.4.92
-nvidia-cuda-nvrtc==13.4.92
 nvidia-cuda-nvrtc-cu12==12.9.86
-nvidia-cuda-runtime==13.4.92
 nvidia-cuda-runtime-cu12==12.9.79
 nvidia-cudnn-cu12==9.20.0.48
 nvidia-cudnn-frontend==1.30.0
@@ -117,7 +114,6 @@ nvidia-nccl-cu12==2.29.7
 nvidia-nvjitlink-cu12==12.9.86
 nvidia-nvshmem-cu12==3.4.5
 nvidia-nvtx-cu12==12.9.79
-nvidia-nvvm==13.4.92
 nvtx==0.2.15
 openai==3.26.0
 opencv-python-headless==5.0.0.93
@@ -204,7 +200,6 @@ typing-inspection==0.4.4
 urllib3==2.8.0
 uvicorn==0.54.0
 uvloop==0.23.0
-vllm==0.31.0
 watchfiles==1.3.0
 websockets==17.2
 werkzeug==3.1.9

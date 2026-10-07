@@ -3,7 +3,9 @@
 name: orthrus-probe-gpu
 desc: Torch/CUDA stack, GEMM, compiled FlexAttention, HF Hub download speed
 # `timeout` is a hard stop inside the job; --max-minutes in ds.py also cancels it from outside.
-cmd: timeout 50m python3 scripts/probe_gpu.py ${REPORT}
+# Code ships via `local-paths` (zipped onto PYTHONPATH) and runs with `python3 -m`; datasphere 0.10.0
+# crashes on `local-paths: []`, so even a single script is passed this way.
+cmd: timeout 50m python3 -m probe_gpu ${REPORT}
 env:
   vars:
     - PYTHONUNBUFFERED: 1

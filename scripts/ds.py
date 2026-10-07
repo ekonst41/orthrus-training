@@ -1,4 +1,4 @@
-"""Thin DataSphere CLI wrapper: project id from .env, logs in .ds_logs/, runs from the repo root.
+"""Thin DataSphere CLI wrapper: project id from .env, per-run logs in .ds_logs/, repo-root cwd.
 
 Usage:
   python scripts/ds.py run jobs/x.yaml [--max-minutes N]  # submit, stream logs, cancel after N min
@@ -79,37 +79,41 @@ def run_with_deadline(cli: str, command: list[str], max_minutes: float | None) -
 
 
 def main() -> int:
+    # Job logs carry arbitrary Unicode (progress bars); never let printing kill the watchdog.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     load_dotenv(ROOT / ".env")
     os.environ.setdefault("YC_CLI_INITIALIZATION_SILENCE", "true")
-    if len(sys.argv) < 2:
+    commands = ("run", "attach", "list", "get", "cancel", "download", "ttl")
+    if len(sys.argv) < 2 or sys.argv[1] not in commands:
         sys.exit(__doc__)
     command, args = sys.argv[1], sys.argv[2:]
-    cli = find_cli()
-    LOG_DIR.mkdir(exist_ok=True)
-    job = [cli, "--log-dir", str(LOG_DIR), "project", "job"]
-
     project = os.environ.get("DS_PROJECT_ID")
     if command in ("run", "list") and not project:
         sys.exit("Set DS_PROJECT_ID in .env")
-    if command == "run":
-        max_minutes = None
-        if "--max-minutes" in args:
-            at = args.index("--max-minutes")
-            max_minutes = float(args[at + 1])
-            args = args[:at] + args[at + 2 :]
-        return run_with_deadline(cli, [*job, "execute", "-p", project, "-c", *args], max_minutes)
+    max_minutes = None
+    if command == "run" and "--max-minutes" in args:
+        at = args.index("--max-minutes")
+        max_minutes = float(args[at + 1])
+        args = args[:at] + args[at + 2 :]
 
-    commands = {
+    cli = find_cli()
+    # One log directory per invocation: the CLI overwrites stdout.txt/system.log otherwise.
+    label = Path(args[0]).stem if command == "run" and args else command
+    run_logs = LOG_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}-{label}"
+    run_logs.mkdir(parents=True, exist_ok=True)
+    job = [cli, "--log-dir", str(run_logs), "project", "job"]
+    argv = {
+        "run": [*job, "execute", "-p", str(project), "-c", *args],
         "list": [*job, "list", "-p", str(project)],
         "attach": [*job, "attach", "--id", *args],
         "get": [*job, "get", "--id", *args],
         "cancel": [*job, "cancel", "--id", *args],
         "download": [*job, "download-files", "--id", *args],
         "ttl": [*job, "set-data-ttl", "--id", *args[:1], "--days", *args[1:]],
-    }
-    if command not in commands:
-        sys.exit(__doc__)
-    return subprocess.call(commands[command], cwd=ROOT)
+    }[command]
+    if command == "run":
+        return run_with_deadline(cli, argv, max_minutes)
+    return subprocess.call(argv, cwd=ROOT)
 
 
 if __name__ == "__main__":
