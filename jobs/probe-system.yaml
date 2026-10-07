@@ -1,8 +1,9 @@
 # Cheap host probe (no pip install): GPU driver, toolchain, disk, network.
-# Run from the repo root: python scripts/ds.py run jobs/probe-system.yaml
+# Run from the repo root: python scripts/ds.py run jobs/probe-system.yaml --max-minutes 60
 name: orthrus-probe-system
 desc: Host probe without Python dependencies (driver, toolchain, disk, network)
-cmd: bash scripts/probe_system.sh ${REPORT}
+# `timeout` is a hard stop inside the job; --max-minutes in ds.py also cancels it from outside.
+cmd: timeout 50m bash scripts/probe_system.sh ${REPORT}
 inputs:
   - scripts/probe_system.sh
 outputs:

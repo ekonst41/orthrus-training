@@ -30,9 +30,12 @@ torch 2.13.0 + transformers 5.17.0 выбраны как общий стек с 
 
 ```bash
 uv pip compile requirements/dev.in --universal --python-version 3.12 -o requirements/dev.txt
-uv pip compile requirements/train.in --python-version 3.12 --python-platform x86_64-manylinux_2_28 -o requirements/train.txt
-uv pip compile requirements/datagen.in --python-version 3.12 --python-platform x86_64-manylinux_2_28 -o requirements/datagen.txt
+uv pip compile requirements/train.in --python-version 3.12 --python-platform x86_64-manylinux_2_28 --no-header --no-annotate -o requirements/train.txt
+uv pip compile requirements/datagen.in --python-version 3.12 --python-platform x86_64-manylinux_2_28 --no-header --no-annotate -o requirements/datagen.txt
 ```
+
+`--no-header --no-annotate` обязательны для `train.txt` и `datagen.txt`: DataSphere CLI отвергает
+файл зависимостей с комментариями и маркерами окружения.
 
 На своём GPU-сервере: `pip install -r requirements/train.txt`.
 
@@ -48,7 +51,8 @@ uv pip compile requirements/datagen.in --python-version 3.12 --python-platform x
 Запуск (из корня репозитория, в активированном `.venv`):
 
 ```bash
-python scripts/ds.py run jobs/probe-system.yaml   # запустить задание и смотреть логи
+python scripts/ds.py run jobs/probe-system.yaml --max-minutes 60  # запустить, смотреть логи,
+                                                  # отменить задание через 60 минут
 python scripts/ds.py attach <job_id>              # переподключиться к идущему заданию
 python scripts/ds.py list                         # задания проекта
 python scripts/ds.py cancel <job_id>
