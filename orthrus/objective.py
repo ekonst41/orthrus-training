@@ -20,7 +20,7 @@ from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import flex_attention
+from torch.nn.attention.flex_attention import BlockMask, flex_attention
 from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
 
 from orthrus.modeling_orthrus import OrthrusLM, build_block_mask, diffusion_attention
@@ -151,6 +151,37 @@ def diffusion_layer(x, cos, sin, ar_k, ar_v, block_mask, w: Layer, eps, head_dim
     return _mlp_residual(x, w, eps)
 
 
+def skip_ar_key_grads(mask: BlockMask, ar_len: int) -> BlockMask:
+    """The same mask, but the backward skips dK/dV of the AR keys: they come from the frozen
+    teacher pass and get no gradient, yet are almost all of the dK/dV work (every block attends
+    its whole prefix). The dK/dV programs of a key block iterate over its q-block lists, so
+    emptying them for the AR key blocks makes those programs no-ops; the forward and dQ read the
+    kv-block lists, which are unchanged. Gradients that are used stay bit-identical."""
+    ar_blocks = ar_len // mask.BLOCK_SIZE[1]
+
+    def emptied(counts):
+        if counts is None:
+            return None
+        counts = counts.clone()
+        counts[..., :ar_blocks] = 0
+        return counts
+
+    return BlockMask(
+        mask.seq_lengths,
+        mask.kv_num_blocks,
+        mask.kv_indices,
+        mask.full_kv_num_blocks,
+        mask.full_kv_indices,
+        emptied(mask.q_num_blocks),
+        mask.q_indices,
+        emptied(mask.full_q_num_blocks),
+        mask.full_q_indices,
+        BLOCK_SIZE=mask.BLOCK_SIZE,
+        mask_mod=mask.mask_mod,
+    )
+
+
+SKIP_AR_KEY_GRADS = True  # switch for benchmarks; the result is the same either way
 _LAYER_FUNCTIONS: dict = {}
 
 
@@ -215,6 +246,8 @@ def model_states(
     x = backbone.embed_tokens(block_ids.flatten(1))
     cos, sin = backbone.rotary_emb(x, positions.flatten(1))
     block_mask = build_block_mask(anchors, seq_len, block_size)
+    if SKIP_AR_KEY_GRADS:
+        block_mask = skip_ar_key_grads(block_mask, seq_len)
     checkpoint = model.is_gradient_checkpointing and torch.is_grad_enabled()
     for w, (k, v) in zip(weights, cache, strict=True):
         args = (x, cos, sin, k, v, block_mask, w, eps, head_dim)
@@ -279,7 +312,7 @@ def kl_chunk(teacher_logits, student_logits, index, grad_dtype: torch.dtype | No
     return kl, agree, diff
 
 
-_compiled_kl_chunk = torch.compile(kl_chunk, dynamic=True)  # row counts vary between chunks
+_compiled_kl_chunk = torch.compile(kl_chunk)  # static vocabulary; row counts marked dynamic
 
 
 class FusedLinearForwardKL(torch.autograd.Function):
@@ -310,12 +343,15 @@ class FusedLinearForwardKL(torch.autograd.Function):
         for start, end, first, last in zip(
             starts, ends, edges[: len(starts)], edges[len(starts) :], strict=True
         ):
-            kl, agree[start:end], diff = chunk(
+            inputs = (
                 _logits(teacher[first : last + 1], weight),
                 _logits(student[start:end], weight),
                 index[start:end] - first,
-                weight.dtype if grad is not None else None,
             )
+            if chunk is not kl_chunk:  # one graph for all chunks, specialized to the vocabulary
+                for tensor in inputs:
+                    torch._dynamo.maybe_mark_dynamic(tensor, 0)
+            kl, agree[start:end], diff = chunk(*inputs, weight.dtype if grad is not None else None)
             total += kl
             if grad is not None:
                 grad[start:end] = (diff @ weight).to(grad.dtype)
