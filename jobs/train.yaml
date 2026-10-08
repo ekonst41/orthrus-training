@@ -1,0 +1,27 @@
+# Train the diffusion view; continues from the newest checkpoint of the run in the bucket.
+# Rerun the same job to continue after train.max_hours. python scripts/ds.py run jobs/train.yaml
+name: orthrus-train
+desc: Orthrus training (paper recipe, Qwen3-0.6B); resumable, checkpoints in the HF bucket
+cmd: timeout --kill-after=10m 23h python3 -m orthrus.train --config configs/qwen3-0.6b.yaml
+inputs:
+  - configs/qwen3-0.6b.yaml
+  - requirements/train.txt
+env:
+  vars:
+    - HF_HUB_DISABLE_PROGRESS_BARS: 1
+    - TOKENIZERS_PARALLELISM: "false"
+    - PYTHONUNBUFFERED: 1
+    - ORTHRUS_BUCKET          # value from the local environment (.env, set by scripts/ds.py)
+    - ORTHRUS_TRACKIO_SPACE
+    - ORTHRUS_GIT_COMMIT
+  python:
+    type: manual
+    version: 3.12
+    requirements-file: requirements/train.txt
+    local-paths:
+      - orthrus
+graceful-shutdown:          # cancel sends SIGTERM: the trainer saves and uploads a checkpoint
+  signal: SIGTERM
+  timeout: 5m
+cloud-instance-types:
+  - g2.1

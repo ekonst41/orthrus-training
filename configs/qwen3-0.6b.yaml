@@ -1,0 +1,31 @@
+# Paper recipe (arXiv:2605.12825, Table 3) for Qwen3-0.6B on one A100 80GB.
+# Values not set here come from orthrus/config.py (each default notes its source).
+run_name: qwen3-0.6b-paper
+
+model:
+  base: Qwen/Qwen3-0.6B
+  block_size: 32            # K, paper
+
+data:
+  dataset: nemotron-v2-qwen3-0.6b
+  seq_len: 2048             # packed rows, paper
+  eval_rows: 256
+
+train:
+  epochs: 2                 # paper; check the ETA of the first steps against the budget
+  global_batch_size: 128    # paper: micro 1 x accumulation 16 x 8 GPUs
+  micro_batch_size: 4       # one A100: 4 x accumulation 32 (tune with the smoke run memory)
+  learning_rate: 2.0e-4     # paper, cosine with 5% warmup
+  num_anchor_blocks: 256    # paper
+  max_hours: 22             # one DataSphere job; rerun the same config to continue
+  eval_every: 500
+  save_every: 250
+
+eval:
+  prompts: 32
+  max_new_tokens: 256
+
+datagen:
+  samples_per_domain: 175000  # math/code/chat 1:1:1 (code has 175k prompts)
+  max_new_tokens: 2048
+  max_hours: 22

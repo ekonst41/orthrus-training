@@ -1,0 +1,33 @@
+# End-to-end check of the whole pipeline on a GPU in ~20 minutes: datagen -> train -> evaluate.
+# Same model and per-sequence work as the paper recipe (K=32, 256 blocks, 2048 tokens), tiny data,
+# so the logged seconds per step and memory also calibrate the full run.
+run_name: smoke-qwen3-0.6b
+
+model:
+  base: Qwen/Qwen3-0.6B
+  block_size: 32
+
+data:
+  dataset: smoke-qwen3-0.6b
+  seq_len: 2048
+  eval_rows: 16
+
+train:
+  epochs: 2
+  global_batch_size: 16
+  micro_batch_size: 4
+  num_anchor_blocks: 256
+  log_every: 1
+  eval_every: 10
+  save_every: 5
+
+eval:
+  prompts: 8
+  max_new_tokens: 256
+  check_ar_parity: true
+
+datagen:
+  samples_per_domain: 200
+  eval_prompts_per_domain: 8
+  max_new_tokens: 512
+  shard_size: 300

@@ -6,12 +6,13 @@ aiohttp==3.14.4
 aiosignal==1.4.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
-anthropic==1.12.0
+anthropic==1.12.1
 anyio==4.15.1
 apache-tvm-ffi==0.1.11
 astor==0.8.1
 attrs==26.1.0
 blake3==1.0.10
+brotli==1.2.0
 cachetools==7.2.1
 cbor2==6.1.5
 certifi==2026.7.22
@@ -45,6 +46,7 @@ flashinfer-python==0.7.0.post1
 frozenlist==1.8.0
 fsspec==2026.7.0
 googleapis-common-protos==1.75.5
+gradio-client==2.7.2
 grpcio==1.84.0
 h11==0.16.0
 hf-xet==1.7.0
@@ -127,6 +129,7 @@ opentelemetry-proto==1.45.1
 opentelemetry-sdk==1.45.1
 opentelemetry-semantic-conventions==0.66b1
 opentelemetry-semantic-conventions-ai==0.5.1
+orjson==3.13.0
 oss-harmony==0.0.11
 outlines-core==0.2.14
 packaging==26.3
@@ -188,6 +191,7 @@ torch==2.13.0+cu129
 torch-c-dlpack-ext==0.1.5
 torchvision==0.28.0+cu129
 tqdm==4.70.1
+trackio==0.41.0
 transformers==5.17.0
 triton==3.7.1
 truststore==0.10.4

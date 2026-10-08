@@ -1,0 +1,30 @@
+# Generate the training data with vLLM; shards go to the bucket as they finish.
+# Resumable: rerun to continue. python scripts/ds.py run jobs/datagen.yaml --max-minutes 1400
+name: orthrus-datagen
+desc: Nemotron v2 prompts answered by the frozen AR model with vLLM (shards to the HF bucket)
+cmd: >-
+  bash -c "python3 -m pip install -q --no-deps -r requirements/datagen-urls.txt &&
+  timeout --kill-after=10m 23h python3 -m orthrus.datagen --config configs/qwen3-0.6b.yaml"
+inputs:
+  - configs/qwen3-0.6b.yaml
+  - requirements/datagen-urls.txt
+  - requirements/train.txt
+env:
+  vars:
+    - HF_HUB_DISABLE_PROGRESS_BARS: 1
+    - TOKENIZERS_PARALLELISM: "false"
+    - PYTHONUNBUFFERED: 1
+    - ORTHRUS_BUCKET          # value from the local environment (.env, set by scripts/ds.py)
+    - ORTHRUS_TRACKIO_SPACE
+    - ORTHRUS_GIT_COMMIT
+  python:
+    type: manual
+    version: 3.12
+    requirements-file: requirements/datagen.txt
+    local-paths:
+      - orthrus
+graceful-shutdown:
+  signal: SIGTERM
+  timeout: 5m
+cloud-instance-types:
+  - g2.1

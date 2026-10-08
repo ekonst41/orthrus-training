@@ -1,6 +1,7 @@
 # Local development on any OS (CPU): unit tests with tiny models and the DataSphere CLI.
 -r base.in
 torch==2.13.0
+trackio>=0.41
 pytest
 ruff
 datasphere
