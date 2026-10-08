@@ -57,10 +57,11 @@ class Tracker:
                 log.warning("Trackio log failed: %s", error)
 
     def progress(self, fraction: float, message: str) -> None:
-        """Progress bar of the DataSphere job page (no-op outside DataSphere)."""
+        """Progress bar of the DataSphere job page (no-op outside DataSphere). Rewritten each time:
+        DataSphere kept showing the first line of an appended file."""
         if self.progress_file:
             entry = {"progress": round(100 * min(max(fraction, 0.0), 1.0)), "message": message}
-            with open(self.progress_file, "a", encoding="utf-8") as file:
+            with open(self.progress_file, "w", encoding="utf-8") as file:
                 file.write(json.dumps(entry) + "\n")
 
     def close(self) -> None:

@@ -1,0 +1,27 @@
+# Evaluate the smoke model twice: bf16 (as deployed) and fp32 (AR parity without bf16 rounding).
+# python scripts/ds.py run jobs/smoke-eval.yaml --max-minutes 45
+name: orthrus-smoke-eval
+desc: Smoke model speed evaluation in bf16 and fp32 (AR parity diagnostics)
+cmd: >-
+  timeout --kill-after=2m 40m bash -c
+  "python3 -m orthrus.evaluate --config configs/smoke.yaml eval.dtype=bfloat16 &&
+  python3 -m orthrus.evaluate --config configs/smoke.yaml eval.dtype=float32"
+inputs:
+  - configs/smoke.yaml
+  - requirements/train.txt
+env:
+  vars:
+    - HF_HUB_DISABLE_PROGRESS_BARS: 1
+    - TOKENIZERS_PARALLELISM: "false"
+    - PYTHONUNBUFFERED: 1
+    - ORTHRUS_BUCKET
+    - ORTHRUS_TRACKIO_SPACE
+    - ORTHRUS_GIT_COMMIT
+  python:
+    type: manual
+    version: 3.12
+    requirements-file: requirements/train.txt
+    local-paths:
+      - orthrus
+cloud-instance-types:
+  - g2.1

@@ -62,6 +62,7 @@ class EvalConfig:
     prompts: int = 32  # held-out prompts for generation metrics during training
     max_new_tokens: int = 256
     check_ar_parity: bool = False  # also decode with the AR view and compare tokens (slower)
+    dtype: str = "bfloat16"  # evaluate.py on GPU; "float32" checks AR parity without bf16 rounding
 
 
 @dataclass

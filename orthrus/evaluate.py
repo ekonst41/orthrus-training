@@ -41,16 +41,22 @@ def _sync(device: torch.device) -> None:
 
 
 @torch.inference_mode()
-def ar_generate(model, prompt: torch.Tensor, max_new_tokens: int, eos: set[int]) -> list[int]:
-    """Plain greedy decoding with the frozen AR view (reference for parity and speed)."""
+def ar_generate(
+    model, prompt: torch.Tensor, max_new_tokens: int, eos: set[int]
+) -> tuple[list[int], list[float]]:
+    """Plain greedy decoding with the frozen AR view (reference for parity and speed).
+    Also returns the top-1 minus top-2 logit gap per token, to tell rounding ties from bugs."""
     cache = DynamicCache(config=model.config)
     logits = model(input_ids=prompt, past_key_values=cache, use_cache=True).logits
     tokens: list[int] = []
+    gaps = []
     while True:
-        token = logits[:, -1].argmax(-1, keepdim=True)
+        token = logits[:, -1].argmax(-1, keepdim=True)  # argmax tie-breaking, as in decoding
+        top2 = logits[0, -1].topk(2).values
+        gaps.append(top2[0] - top2[1])
         tokens.append(int(token))
         if tokens[-1] in eos or len(tokens) == max_new_tokens:
-            return tokens
+            return tokens, torch.stack(gaps).float().tolist()
         logits = model(input_ids=token, past_key_values=cache, use_cache=True).logits
 
 
@@ -63,7 +69,7 @@ def generation_metrics(
     model.eval()
     device = next(model.parameters()).device
     totals = {"tokens": 0, "passes": 0, "cycles": 0, "accepted": 0, "seconds": 0.0}
-    ar_seconds, matches = 0.0, 0
+    ar_seconds, matches, divergences, gaps = 0.0, 0, [], []
     for prompt_ids in prompts:
         prompt = torch.tensor([prompt_ids], device=device)
         _sync(device)
@@ -77,10 +83,23 @@ def generation_metrics(
         totals["accepted"] += sum(stats.accepted)
         if compare_ar:
             start = time.perf_counter()
-            reference = ar_generate(model, prompt, max_new_tokens, eos)
+            reference, reference_gaps = ar_generate(model, prompt, max_new_tokens, eos)
             _sync(device)
             ar_seconds += time.perf_counter() - start
-            matches += output[0, len(prompt_ids) :].tolist() == reference
+            generated = output[0, len(prompt_ids) :].tolist()
+            if generated == reference:
+                matches += 1
+            else:
+                first = next(
+                    (
+                        i
+                        for i, (a, b) in enumerate(zip(generated, reference, strict=False))
+                        if a != b
+                    ),
+                    min(len(generated), len(reference)),
+                )
+                divergences.append(first)
+                gaps.append(reference_gaps[min(first, len(reference_gaps) - 1)])
     model.train(was_training)
     cycles = max(totals["cycles"], 1)
     metrics = {
@@ -93,6 +112,9 @@ def generation_metrics(
     if compare_ar:
         metrics["ar_match"] = matches / max(len(prompts), 1)
         metrics["speedup"] = ar_seconds / max(totals["seconds"], 1e-9)
+        if divergences:  # where outputs first differ, and how close AR's top-2 logits were there
+            metrics["ar_first_divergence"] = sum(divergences) / len(divergences)
+            metrics["ar_divergence_logit_gap"] = sorted(gaps)[len(gaps) // 2]
     return metrics
 
 
@@ -122,7 +144,7 @@ BENCHMARKS = {
     "gsm8k": lambda: _load("openai/gsm8k", "test", "question", "main"),
     "math500": lambda: _load("HuggingFaceH4/MATH-500", "test", "problem"),
     "humaneval": lambda: _load("openai/openai_humaneval", "test", "prompt"),
-    "mbpp": lambda: _load("google-research-datasets/mbpp", "test", "text", "sanitized"),
+    "mbpp": lambda: _load("google-research-datasets/mbpp", "test", "prompt", "sanitized"),
 }
 
 
@@ -144,7 +166,7 @@ def main(argv: list[str] | None = None) -> None:
             raise FileNotFoundError(f"no exported model for run {cfg.run_name}")
     model_cfg = cfg.model
     model_cfg.base = str(final_dir)
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    dtype = getattr(torch, cfg.eval.dtype) if device.type == "cuda" else torch.float32
     model, tokenizer, _ = load_model(model_cfg, device, dtype)
     eos = eos_token_ids(model, tokenizer)
 
@@ -165,7 +187,7 @@ def main(argv: list[str] | None = None) -> None:
         results[name] = {"prompts": len(prompts), **metrics}
         log.info("%s: %s", name, json.dumps(results[name]))
         tracker.log({f"{name}/{k}": v for k, v in metrics.items()}, step=step)
-    out = run_dir / f"eval-{cfg.eval.max_new_tokens}.json"
+    out = run_dir / f"eval-{cfg.eval.max_new_tokens}-{cfg.eval.dtype}.json"
     out.write_text(json.dumps(results, indent=2), encoding="utf-8")
     bucket.upload(out, f"runs/{cfg.run_name}/{out.name}")
     tracker.close()
