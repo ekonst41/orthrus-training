@@ -1,8 +1,10 @@
 """Generate the training data (paper, App. A) with vLLM.
 
 Prompts come from Nemotron-Post-Training-Dataset-v2 (math, code, chat, 1:1:1) and are answered by
-the frozen AR model itself (greedy, thinking disabled). Each shard of token ids is uploaded to
-data/<dataset>/raw/ as soon as it is ready; a rerun continues with the first missing shard.
+the frozen AR model itself (greedy, thinking disabled). The prompt selection is cached as
+data/<dataset>/prompts.parquet, so a rerun answers the same prompts in the same order. Each shard of
+token ids is uploaded to data/<dataset>/raw/ as soon as it is ready; a rerun continues with the
+first missing shard. Speed settings (vLLM speculative decoding etc.): see orthrus/genbench.py.
 
     python -m orthrus.datagen --config configs/qwen3-0.6b.yaml [datagen.samples_per_domain=200]
 """
@@ -17,7 +19,6 @@ import time
 import traceback
 from pathlib import Path
 
-import psutil
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -102,6 +103,103 @@ def sample_prompts(cfg: DatagenConfig, tokenizer) -> tuple[list[dict], list[dict
     return train, eval_prompts, revision
 
 
+def end_tokens(model: str, tokenizer) -> tuple[set[int], int]:
+    """(ids that end a response, the end-of-turn id <|im_end|>)."""
+    eos = set(GenerationConfig.from_pretrained(model).eos_token_id or [])
+    end_of_turn = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    return eos | {end_of_turn}, end_of_turn
+
+
+def selected_prompts(cfg, tokenizer, bucket: Bucket, out_dir: Path) -> tuple[list, list, str]:
+    """(train prompts, eval prompts, source revision), from the cached selection when it was made
+    with the same settings, else sampled and cached (in the bucket too)."""
+    d, path = cfg.datagen, out_dir / "prompts.parquet"
+    key = {
+        "source": d.source,
+        "domains": list(d.domains),
+        "samples_per_domain": d.samples_per_domain,
+        "eval_prompts_per_domain": d.eval_prompts_per_domain,
+        "max_prompt_tokens": d.max_prompt_tokens,
+        "seed": d.seed,
+        "tokenizer": cfg.model.base,
+    }
+    remote = f"data/{cfg.data.dataset}/prompts.parquet"
+    if not path.exists():
+        bucket.download_file(remote, path)
+    if path.exists():
+        table = pq.read_table(path)
+        meta = json.loads((table.schema.metadata or {}).get(b"orthrus", b"{}"))
+        if meta.get("key") == key:
+            rows = table.to_pylist()
+            splits = {"train": [], "eval": []}
+            for row in rows:
+                splits[row.pop("split")].append(row)
+            log.info("reusing %d cached prompts (%s)", len(rows), remote)
+            return splits["train"], splits["eval"], meta["revision"]
+        log.info("cached prompts were selected with other settings: sampling again")
+    train, eval_prompts, revision = sample_prompts(d, tokenizer)
+    rows = [{**p, "split": "train"} for p in train] + [{**p, "split": "eval"} for p in eval_prompts]
+    table = pa.table(
+        {
+            "uuid": [r["uuid"] for r in rows],
+            "domain": [r["domain"] for r in rows],
+            "prompt_ids": pa.array([r["prompt_ids"] for r in rows], type=pa.list_(pa.int32())),
+            "split": [r["split"] for r in rows],
+        }
+    )
+    meta = {"key": key, "revision": revision}
+    pq.write_table(table.replace_schema_metadata({"orthrus": json.dumps(meta)}), path)
+    bucket.upload(path, remote)
+    return train, eval_prompts, revision
+
+
+def build_engine(cfg, **overrides):
+    """vLLM engine with the datagen settings; overrides are extra or replaced LLM arguments."""
+    # The DataSphere image ships nvcc 11.8, which cannot JIT-compile FlashInfer's sampler.
+    os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    from vllm import LLM
+
+    d = cfg.datagen
+    kwargs = {
+        "model": cfg.model.base,
+        "dtype": "bfloat16",
+        "seed": d.seed,
+        "max_model_len": d.max_prompt_tokens + d.max_new_tokens,
+        "gpu_memory_utilization": d.gpu_memory_utilization,
+        "max_num_seqs": d.max_num_seqs,
+    }
+    if d.speculative:
+        kwargs["speculative_config"] = dict(d.speculative)
+    kwargs.update(overrides)
+    return LLM(**kwargs)
+
+
+def sampling_params(cfg, eos: set[int], detokenize: bool = False):
+    """Greedy (paper) sampling; text is never needed, so detokenization is off by default."""
+    from vllm import SamplingParams
+
+    d = cfg.datagen
+    return SamplingParams(
+        temperature=d.temperature,
+        max_tokens=d.max_new_tokens,
+        seed=d.seed,
+        stop_token_ids=sorted(eos),
+        detokenize=detokenize,
+    )
+
+
+def responses(outputs, eos: set[int], end_of_turn: int) -> tuple[list[list[int]], list[str]]:
+    """Token ids and finish reasons of vLLM outputs; a finished turn always ends with an end id."""
+    ids_list, reasons = [], []
+    for output in outputs:
+        ids, reason = list(output.outputs[0].token_ids), output.outputs[0].finish_reason
+        if reason == "stop" and (not ids or ids[-1] not in eos):
+            ids.append(end_of_turn)  # the turn ended: make the end-of-turn token explicit
+        ids_list.append(ids)
+        reasons.append(reason)
+    return ids_list, reasons
+
+
 def main(argv: list[str] | None = None) -> None:
     cfg = parse_args(__doc__, argv)
     logging.basicConfig(
@@ -115,10 +213,8 @@ def main(argv: list[str] | None = None) -> None:
     remote = f"data/{cfg.data.dataset}"
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model.base)
-    eos = set(GenerationConfig.from_pretrained(cfg.model.base).eos_token_id or [])
-    eos.add(tokenizer.convert_tokens_to_ids("<|im_end|>"))
-    end_of_turn = tokenizer.convert_tokens_to_ids("<|im_end|>")
-    train, eval_prompts, revision = sample_prompts(d, tokenizer)
+    eos, end_of_turn = end_tokens(cfg.model.base, tokenizer)
+    train, eval_prompts, revision = selected_prompts(cfg, tokenizer, bucket, out_dir)
     with (out_dir / "eval_prompts.jsonl").open("w", encoding="utf-8") as file:
         file.writelines(json.dumps(p) + "\n" for p in eval_prompts)
     bucket.upload(out_dir / "eval_prompts.jsonl", f"{remote}/eval_prompts.jsonl")
@@ -150,25 +246,10 @@ def main(argv: list[str] | None = None) -> None:
     if not todo:
         return
 
-    # The DataSphere image ships nvcc 11.8, which cannot JIT-compile FlashInfer's sampler.
-    os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
-    from vllm import LLM, SamplingParams
     from vllm.inputs import TokensPrompt
 
-    llm = LLM(
-        model=cfg.model.base,
-        dtype="bfloat16",
-        seed=d.seed,
-        max_model_len=d.max_prompt_tokens + d.max_new_tokens,
-        gpu_memory_utilization=d.gpu_memory_utilization,
-        max_num_seqs=d.max_num_seqs,
-    )
-    params = SamplingParams(
-        temperature=d.temperature,
-        max_tokens=d.max_new_tokens,
-        seed=d.seed,
-        stop_token_ids=sorted(eos),
-    )
+    llm = build_engine(cfg)
+    params = sampling_params(cfg, eos)
     tracker = Tracker(cfg, out_dir, "datagen")
     for index in todo:
         if d.max_hours and time.time() - started > d.max_hours * 3600:
@@ -180,26 +261,20 @@ def main(argv: list[str] | None = None) -> None:
             [TokensPrompt(prompt_token_ids=p["prompt_ids"]) for p in batch], params, use_tqdm=False
         )
         seconds = time.perf_counter() - start
-        responses, reasons = [], []
-        for output in outputs:
-            ids, reason = list(output.outputs[0].token_ids), output.outputs[0].finish_reason
-            if reason == "stop" and (not ids or ids[-1] not in eos):
-                ids.append(end_of_turn)  # the turn ended: make the end-of-turn token explicit
-            responses.append(ids)
-            reasons.append(reason)
+        response_ids, reasons = responses(outputs, eos, end_of_turn)
         name = f"shard-{index:05d}.parquet"
         table = pa.table(
             {
                 "uuid": [p["uuid"] for p in batch],
                 "domain": [p["domain"] for p in batch],
                 "prompt_ids": pa.array([p["prompt_ids"] for p in batch], type=pa.list_(pa.int32())),
-                "response_ids": pa.array(responses, type=pa.list_(pa.int32())),
+                "response_ids": pa.array(response_ids, type=pa.list_(pa.int32())),
                 "finish_reason": reasons,
             }
         )
         pq.write_table(table, raw_dir / name)
         bucket.upload(raw_dir / name, f"{remote}/raw/{name}")
-        generated = sum(len(r) for r in responses)
+        generated = sum(len(r) for r in response_ids)
         tracker.log(
             {
                 "datagen/output_tokens_per_second": generated / seconds,
@@ -226,6 +301,8 @@ def main(argv: list[str] | None = None) -> None:
 def exit_now(code: int = 0) -> None:
     """Exit without interpreter teardown, which hung on DataSphere after the last shard (vLLM's
     engine process kept the job alive with the GPU idle). Everything is uploaded by now."""
+    import psutil
+
     logging.shutdown()
     sys.stdout.flush()
     sys.stderr.flush()

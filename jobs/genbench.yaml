@@ -1,0 +1,28 @@
+# Data-generation benchmark (orthrus/genbench.py): vLLM throughput, speculative decoding and
+# output agreement on the first 700 real prompts per domain at the full run's limits (~40 min).
+# python scripts/ds.py run jobs/genbench.yaml --max-minutes 70
+name: orthrus-genbench
+desc: Data-generation speed benchmark (results to bench/ in the HF bucket)
+cmd: >-
+  bash -c "python3 -m pip install -q --no-deps -r requirements/datagen-urls.txt &&
+  timeout --kill-after=2m 62m python3 -m orthrus.genbench --config configs/qwen3-0.6b.yaml"
+inputs:
+  - configs/qwen3-0.6b.yaml
+  - requirements/datagen-urls.txt
+  - requirements/train.txt
+env:
+  vars:
+    - HF_HUB_DISABLE_PROGRESS_BARS: 1
+    - TOKENIZERS_PARALLELISM: "false"
+    - PYTHONUNBUFFERED: 1
+    - ORTHRUS_BUCKET
+    - ORTHRUS_TRACKIO_SPACE
+    - ORTHRUS_GIT_COMMIT
+  python:
+    type: manual
+    version: 3.12
+    requirements-file: requirements/datagen.txt
+    local-paths:
+      - orthrus
+cloud-instance-types:
+  - g2.1

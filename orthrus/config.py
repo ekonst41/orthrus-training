@@ -79,6 +79,7 @@ class DatagenConfig:
     shard_size: int = 20_000  # prompts per generated shard (one upload per shard)
     gpu_memory_utilization: float = 0.90
     max_num_seqs: int = 512  # concurrent sequences in vLLM: a 0.6B model needs a large batch
+    speculative: dict = field(default_factory=dict)  # vLLM speculative_config ({}: off)
     max_hours: float = 0  # stop before this wall-clock budget; rerun resumes (0: no limit)
     seed: int = 42
 
