@@ -155,7 +155,7 @@ ids = tokenizer.apply_chat_template(
     add_generation_prompt=True,
     enable_thinking=False,
     return_tensors="pt",
-)
+).input_ids
 print(tokenizer.decode(model.generate(ids, max_new_tokens=256)[0]))  # диффузионный режим
 ```
 
