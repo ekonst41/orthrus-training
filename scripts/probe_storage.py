@@ -14,7 +14,8 @@ import tempfile
 import time
 from pathlib import Path
 
-from huggingface_hub import HfApi, create_bucket, sync_bucket
+from huggingface_hub import HfApi, bucket_info, create_bucket, sync_bucket
+from huggingface_hub.errors import RepositoryNotFoundError
 
 BUCKET = "orthrus-training"
 MIB = 1 << 20
@@ -48,7 +49,13 @@ def main() -> None:
         report["token_role"] = token.get("role")
         report["token_fine_grained"] = bool(token.get("fineGrained"))
         bucket_id = f"{whoami['name']}/{BUCKET}"
-        report["bucket"] = str(create_bucket(bucket_id, private=True, exist_ok=True))
+        try:  # a fine-grained token may write to an existing bucket without being allowed to create
+            info = bucket_info(bucket_id)
+        except RepositoryNotFoundError:
+            create_bucket(bucket_id, private=True)
+            info = bucket_info(bucket_id)
+        report["bucket"] = bucket_id
+        report["bucket_private"] = info.private
         remote = f"hf://buckets/{bucket_id}/probe"
 
         work = Path(tempfile.mkdtemp(prefix="storage_probe_"))

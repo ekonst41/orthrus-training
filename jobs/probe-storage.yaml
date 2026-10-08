@@ -5,6 +5,9 @@ name: orthrus-probe-storage
 desc: HF token rights and HF Storage Bucket throughput (1 GiB checkpoint-like upload/download)
 # `timeout` is a hard stop inside the job; --max-minutes in ds.py also cancels it from outside.
 cmd: timeout 30m bash scripts/probe_storage.sh ${REPORT}
+env:
+  vars:
+    - HF_HUB_DISABLE_PROGRESS_BARS: 1  # keep job logs small (each log file <= 100 MB)
 inputs:
   - scripts/probe_storage.sh
   - scripts/probe_storage.py
