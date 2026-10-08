@@ -10,7 +10,7 @@ Linux-сервере с CUDA.
 
 | Шаг | Команда | Результат в HF-бакете | Время на A100 |
 |---|---|---|---|
-| 1. Данные | `python -m orthrus.datagen --config configs/qwen3-0.6b.yaml` | `data/<dataset>/raw/shard-*.parquet`, `prompts.parquet`, `eval_prompts.jsonl`, `manifest.json`, `datagen_metrics.jsonl` | ~9.5 ч |
+| 1. Данные | `python -m orthrus.datagen --config configs/qwen3-0.6b.yaml` | `data/<dataset>/raw/shard-*.parquet`, `prompts.parquet`, `eval_prompts.jsonl`, `manifest.json`, `datagen_metrics.jsonl` | ~10.5–11 ч |
 | 2. Обучение | `python -m orthrus.train --config configs/qwen3-0.6b.yaml` | `runs/<run>/checkpoints/`, `final/`, `train_metrics.jsonl`, `run.json`, `logs/` | ~29 ч |
 | 3. Оценка | `python -m orthrus.evaluate --config configs/qwen3-0.6b.yaml eval.dtype=float32 eval.max_new_tokens=512` | `runs/<run>/eval-<модель>-<N>-<dtype>.json` | ~45 мин |
 | Просмотр | `python -m orthrus.report --config configs/qwen3-0.6b.yaml [--show]` | — (читает бакет) | — |
@@ -79,8 +79,11 @@ python scripts/ds.py run jobs/eval.yaml --max-minutes 120          # 32 пром
 средний ответ 688 токенов (chat 450, code 620, math 990; 7% обрываются на 2048), средний промпт
 304 токена — итого ~0.52 млрд токенов, ~254 тыс. строк.
 
-Генерация упирается в чтение KV-кэша (112 КБ на токен), поэтому ~10.5 тыс. токенов/с не зависят
-от размера батча (256 и 512 одновременных последовательностей дают одно и то же, вытеснений нет).
+Генерация упирается в чтение KV-кэша (112 КБ на токен), поэтому скорость не зависит от размера
+батча, но падает по мере удлинения контекстов: 12.3 тыс. токенов/с в начале, ~9.5–10 тыс. в
+установившемся режиме, когда в батче копятся длинные ответы (в среднем за замер 10.5 тыс.;
+полная генерация — 361 млн токенов ответов, ~10–10.6 ч плюс ~0.5 ч на подготовку). 256 и 512 одновременных последовательностей дают
+одно и то же, вытеснений нет.
 Speculative decoding в vLLM не ускоряет: `ngram_gpu` 0.99× (принимает 0.6–0.8 токена за шаг),
 `ngram` на CPU 0.90× (принимает 1.6 токена, но предложения для 512 запросов считаются на CPU),
 `suffix` (Arctic Inference) не помещается в память при 24 черновых токенах и тоже работает на CPU;
