@@ -20,6 +20,7 @@ import yaml
 @dataclass
 class ModelConfig:
     base: str = "Qwen/Qwen3-0.6B"
+    revision: str | None = None  # Hub commit of base: pin it, the teacher must be the data's model
     block_size: int = 32  # K, paper
     mask_token_id: int | None = None  # None: len(tokenizer), official init_model.py
     attn_implementation: str = "sdpa"  # AR view; the diffusion view always uses FlexAttention
@@ -55,8 +56,9 @@ class TrainConfig:
     max_hours: float = 0  # stop and save before this wall-clock budget (0: no limit)
     log_every: int = 10
     eval_every: int = 500  # optimizer steps between evaluations (0: only at the end)
-    save_every: int = 250  # optimizer steps between checkpoints
+    save_every: int = 100  # optimizer steps between checkpoints (~45 min on one A100)
     keep_checkpoints: int = 2  # newest checkpoints kept locally and in the bucket
+    stall_minutes: float = 45  # abort when no step finishes this long (a hung job bills the GPU)
 
 
 @dataclass
@@ -65,11 +67,13 @@ class EvalConfig:
     max_new_tokens: int = 256
     check_ar_parity: bool = False  # also decode with the AR view and compare tokens (slower)
     dtype: str = "bfloat16"  # evaluate.py on GPU; "float32" checks AR parity without bf16 rounding
+    checkpoint: str = ""  # evaluate.py: "" the exported model, or "step-0001000" / "latest"
 
 
 @dataclass
 class DatagenConfig:
     source: str = "nvidia/Nemotron-Post-Training-Dataset-v2"  # paper
+    source_revision: str | None = None  # dataset commit (None: latest when first sampled)
     domains: tuple[str, ...] = ("math", "code", "chat")  # 1:1:1, paper
     samples_per_domain: int = 175_000  # code has 175k prompts: largest strictly balanced set
     eval_prompts_per_domain: int = 64  # held out from training for generation metrics
@@ -81,6 +85,7 @@ class DatagenConfig:
     max_num_seqs: int = 512  # concurrent sequences in vLLM: a 0.6B model needs a large batch
     speculative: dict = field(default_factory=dict)  # vLLM speculative_config ({}: off)
     max_hours: float = 0  # stop before this wall-clock budget; rerun resumes (0: no limit)
+    stall_minutes: float = 90  # abort when no shard finishes this long (20k prompts: ~25 min)
     seed: int = 42
 
 
@@ -92,7 +97,8 @@ class StorageConfig:
 
 @dataclass
 class TrackingConfig:
-    enabled: bool = True  # False: metrics only in the local JSONL file
+    enabled: bool = False  # Trackio inside jobs (a dashboard Space needs HF PRO); metrics always
+    # go to the JSONL files in the bucket: view them with `python -m orthrus.report`
     project: str = "orthrus"
     space_id: str | None = None  # Trackio dashboard Space; None: $ORTHRUS_TRACKIO_SPACE; "" local
 

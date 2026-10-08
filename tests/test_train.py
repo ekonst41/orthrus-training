@@ -4,6 +4,7 @@ import json
 import shutil
 
 import numpy as np
+import pytest
 import torch
 import yaml
 from safetensors.torch import load_file
@@ -14,6 +15,7 @@ from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 from orthrus import train
 from orthrus.checkpoint import load_model
 from orthrus.config import ModelConfig
+from orthrus.storage import Bucket
 
 
 def make_base_checkpoint(path):
@@ -48,10 +50,10 @@ def write_dataset(root, name):
     (root / "data" / name / "eval_prompts.jsonl").write_text("".join(lines), encoding="utf-8")
 
 
-def test_training_resumes_bit_exactly(tmp_path):
+def tiny_config(tmp_path):
     make_base_checkpoint(tmp_path / "base")
     write_dataset(tmp_path, "tiny")
-    config = {
+    return {
         "run_name": "tiny",
         "model": {"base": str(tmp_path / "base"), "block_size": 4, "mask_token_id": 511},
         "data": {"dataset": "tiny", "seq_len": 32, "eval_rows": 4, "seed": 0},
@@ -66,10 +68,14 @@ def test_training_resumes_bit_exactly(tmp_path):
             "log_every": 1,
             "kl_chunk_size": 16,
         },
-        "eval": {"prompts": 2, "max_new_tokens": 8},
+        "eval": {"prompts": 2, "max_new_tokens": 8, "check_ar_parity": True},
         "storage": {"bucket": "", "local_dir": str(tmp_path)},
         "tracking": {"enabled": False},
     }
+
+
+def test_training_resumes_bit_exactly(tmp_path):
+    config = tiny_config(tmp_path)
     config_path = tmp_path / "tiny.yaml"
     config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
     run_dir = tmp_path / "runs" / "tiny"
@@ -104,6 +110,24 @@ def test_training_resumes_bit_exactly(tmp_path):
     for name, tensor in uninterrupted.items():
         assert torch.equal(tensor, resumed[name]), name
 
+    # One manifest segment per job; the metrics history continues without duplicate steps.
+    manifest = json.loads((run_dir / "run.json").read_text())
+    assert [s["resumed_at_step"] for s in manifest["segments"]] == [0, 2]
+    assert [s["ended_at_step"] for s in manifest["segments"]] == [4, 4]
+    records = [
+        json.loads(line) for line in (run_dir / "train_metrics.jsonl").read_text().splitlines()
+    ]
+    train_steps = [r["step"] for r in records if "train/loss" in r]
+    assert train_steps == [1, 2, 3, 4]
+    assert len(list((run_dir / "logs").glob("train-*.log"))) >= 1
+
+    # A changed recipe (here the learning rate) cannot continue the same run.
+    shutil.rmtree(checkpoints / "step-0000004")
+    config["train"]["learning_rate"] = 1e-3
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="train.learning_rate"):
+        train.main(["--config", str(config_path)])
+
     # The exported model reloads with its trained diffusion weights (no warm start from AR).
     model, _, _ = load_model(
         ModelConfig(base=str(run_dir / "final"), block_size=4), torch.device("cpu"), torch.float32
@@ -111,3 +135,20 @@ def test_training_resumes_bit_exactly(tmp_path):
     q_ar = model.model.layers[0].self_attn.q_proj.weight
     q_diff = model.model.layers[0].self_attn.q_proj_diff.weight
     assert not torch.equal(q_ar, q_diff)
+
+
+def test_stop_request_saves_and_exits(tmp_path, monkeypatch):
+    """runs/<run>/STOP in the bucket (scripts/ds.py stop): checkpoint, exit, remove the request."""
+    config = tiny_config(tmp_path)
+    config_path = tmp_path / "tiny.yaml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    deleted = []
+    monkeypatch.setattr(Bucket, "exists", lambda self, path: path == "runs/tiny/STOP")
+    monkeypatch.setattr(Bucket, "delete", lambda self, prefix: deleted.append(prefix))
+    train.main(["--config", str(config_path)])
+    run_dir = tmp_path / "runs" / "tiny"
+    assert sorted(p.name for p in (run_dir / "checkpoints").iterdir()) == ["step-0000001"]
+    assert not (run_dir / "final").exists()
+    segment = json.loads((run_dir / "run.json").read_text())["segments"][-1]
+    assert segment["stop_reason"] == "stop requested" and segment["ended_at_step"] == 1
+    assert deleted == ["runs/tiny/STOP"]

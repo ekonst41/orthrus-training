@@ -5,9 +5,13 @@ Usage:
       submit, stream logs, cancel after N minutes; if no VM of the requested type is free,
       resubmit every 5 minutes for up to M minutes
   python scripts/ds.py attach <job_id>        # reattach to a running job
+  python scripts/ds.py stop runs/<run> | data/<dataset>   # clean stop: save, then exit
   python scripts/ds.py list | get <id> | cancel <id> | download <id> | ttl <id> <days>
 
 DataSphere has no server-side time limit for jobs, so `--max-minutes` cancels the job from here.
+A cancel kills the job within ~20 s (the graceful-shutdown period is not honored, checked with
+jobs/probe-signal.yaml); `stop` instead puts a STOP file into the bucket, and training (at its next
+log step) or data generation (after the current shard) saves its progress and exits.
 Jobs receive ORTHRUS_BUCKET / ORTHRUS_TRACKIO_SPACE from .env and ORTHRUS_GIT_COMMIT (the code
 version, recorded in run manifests). The id of the last submitted job is in .ds_logs/last_job_id.
 """
@@ -52,6 +56,22 @@ def find_cli() -> str:
     if cli is None:
         sys.exit("datasphere CLI not found: pip install datasphere")
     return cli
+
+
+def request_stop(prefix: str) -> int:
+    """Ask the job working on runs/<run> or data/<dataset> to save and exit (see module doc)."""
+    from huggingface_hub import batch_bucket_files
+
+    bucket = os.environ.get("ORTHRUS_BUCKET")
+    if not bucket:
+        sys.exit("Set ORTHRUS_BUCKET in .env")
+    marker = LOG_DIR / "STOP"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("stop requested", encoding="utf-8")
+    target = f"{prefix.strip('/')}/STOP"
+    batch_bucket_files(bucket, add=[(str(marker), target)])
+    print(f"[ds] stop requested: {bucket}/{target}; the job saves and exits, then removes it")
+    return 0
 
 
 def take_option(args: list[str], name: str) -> tuple[float | None, list[str]]:
@@ -106,10 +126,16 @@ def main() -> int:
     for name in ("ORTHRUS_BUCKET", "ORTHRUS_TRACKIO_SPACE"):  # jobs list them in env.vars
         os.environ.setdefault(name, "")
     os.environ["ORTHRUS_GIT_COMMIT"] = git_commit()
-    commands = ("run", "attach", "list", "get", "cancel", "download", "ttl")
+    if sys.argv[1:2] == ["run"] and os.environ["ORTHRUS_GIT_COMMIT"].endswith("-dirty"):
+        print("[ds] warning: uncommitted changes; run manifests cannot pin this code", flush=True)
+    commands = ("run", "attach", "stop", "list", "get", "cancel", "download", "ttl")
     if len(sys.argv) < 2 or sys.argv[1] not in commands:
         sys.exit(__doc__)
     command, args = sys.argv[1], sys.argv[2:]
+    if command == "stop":
+        if len(args) != 1 or not args[0].startswith(("runs/", "data/")):
+            sys.exit("usage: python scripts/ds.py stop runs/<run> | data/<dataset>")
+        return request_stop(args[0])
     project = os.environ.get("DS_PROJECT_ID")
     if command in ("run", "list") and not project:
         sys.exit("Set DS_PROJECT_ID in .env")

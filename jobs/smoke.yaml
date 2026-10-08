@@ -1,4 +1,5 @@
-# Whole pipeline on tiny data (~20-30 min): datagen -> train -> evaluate, with configs/smoke.yaml.
+# Whole pipeline on tiny data (~25-30 min): datagen -> train -> evaluate (fp32), with
+# configs/smoke.yaml. Each job trains a fresh run runs/smoke-<job id> (the data is reused).
 # Validates GPU kernels, vLLM, storage and tracking, and calibrates seconds per step and memory.
 # python scripts/ds.py run jobs/smoke.yaml --max-minutes 60
 name: orthrus-smoke
@@ -6,8 +7,8 @@ desc: End-to-end smoke test of datagen, training and evaluation on tiny data
 cmd: >-
   bash -c "python3 -m pip install -q --no-deps -r requirements/datagen-urls.txt &&
   timeout 50m bash -c 'timeout --kill-after=1m 20m python3 -m orthrus.datagen --config configs/smoke.yaml &&
-  python3 -m orthrus.train --config configs/smoke.yaml &&
-  python3 -m orthrus.evaluate --config configs/smoke.yaml'"
+  python3 -m orthrus.train --config configs/smoke.yaml run_name=smoke-$JOB_ID train.keep_checkpoints=1 &&
+  python3 -m orthrus.evaluate --config configs/smoke.yaml run_name=smoke-$JOB_ID eval.dtype=float32'"
 inputs:
   - configs/smoke.yaml
   - requirements/datagen-urls.txt

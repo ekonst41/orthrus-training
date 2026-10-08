@@ -1,9 +1,14 @@
 """Persistent storage in a Hugging Face Storage Bucket (mutable, no git history, Xet deduplication).
 
 Layout inside the bucket:
-    data/<dataset>/...           datagen output (raw shards, eval prompts, manifest)
-    runs/<run_name>/...          checkpoints, final model, metrics, run manifest
-    trackio/...                  Trackio database (managed by Trackio)
+    data/<dataset>/              raw/shard-*.parquet, prompts.parquet (cached prompt selection),
+                                 eval_prompts.jsonl, manifest.json, datagen_metrics.jsonl
+    runs/<run_name>/             checkpoints/step-*/, final/ (export), train_metrics.jsonl,
+                                 run.json (one segment per job), logs/, eval-*.json
+    bench/                       benchmark results (orthrus.bench, orthrus.genbench)
+    runs/<run>/STOP, data/<dataset>/STOP   stop requests (scripts/ds.py stop): the job saves,
+                                 exits and removes the file
+    trackio/...                  Trackio database, only with tracking.enabled (managed by Trackio)
 
 With an empty bucket id every method is a no-op, so the code also runs fully locally.
 """
@@ -50,6 +55,9 @@ class Bucket:
             return sorted(e.path for e in entries if getattr(e, "type", "file") == "file")
         except Exception:  # a missing prefix is not an error
             return []
+
+    def exists(self, remote: str) -> bool:
+        return remote.strip("/") in self.list(remote)
 
     def download(self, remote: str, local: Path) -> bool:
         """Mirror a remote prefix into a local directory; False if nothing is there."""

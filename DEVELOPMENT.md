@@ -55,9 +55,10 @@ python scripts/lock.py            # все; или: python scripts/lock.py train
 
 1. [Yandex Cloud CLI](https://yandex.cloud/ru/docs/cli/quickstart) с авторизацией (`yc init`) под аккаунтом,
    у которого есть роль Developer в проекте DataSphere.
-2. `cp .env.example .env` и заполнить `DS_PROJECT_ID` (ID проекта — в URL страницы проекта),
-   `ORTHRUS_BUCKET` (приватный HF-бакет) и при желании `ORTHRUS_TRACKIO_SPACE` (дашборд).
-   `scripts/ds.py` передаёт их в задания вместе с `ORTHRUS_GIT_COMMIT` — версией кода.
+2. `cp .env.example .env` и заполнить `DS_PROJECT_ID` (ID проекта — в URL страницы проекта) и
+   `ORTHRUS_BUCKET` (приватный HF-бакет). `scripts/ds.py` передаёт их в задания вместе с
+   `ORTHRUS_GIT_COMMIT` — версией кода (с пометкой `-dirty`, если есть незакоммиченные правки:
+   `ds.py` об этом предупреждает). Метрики смотрятся локально: `python -m orthrus.report`.
 3. В проекте DataSphere создать секрет `HF_TOKEN` с правом записи в бакет: секреты проекта
    попадают в задания как переменные окружения.
 
@@ -85,6 +86,17 @@ python scripts/ds.py download <job_id>            # скачать outputs (не
   ограничения длительности на стороне DataSphere нет.
 
 Логи CLI сохраняются в `.ds_logs/<время>-<задание>/`, результаты — в `outputs/` (не в git).
+
+Поток логов CLI иногда останавливается (замечено после обновления токена `yc`), а завершение
+задания CLI может не заметить: статус — `python scripts/ds.py get <id>`, вывод задания —
+`.ds_logs/.../stdout.txt` или `ds.py attach <id>`; метрики обучения в бакете обновляются сами
+(`python -m orthrus.report`). `cancel` снимает задание за ~20 с, не дожидаясь `graceful-shutdown`
+(проверено `jobs/probe-signal.yaml`), поэтому для остановки с сохранением используйте
+`python scripts/ds.py stop runs/<run>` (или `data/<dataset>`): задание само сохранится и выйдет.
+
+Замеры скорости: `jobs/bench.yaml` (шаг обучения, `orthrus/bench.py`) и `jobs/genbench.yaml`
+(генерация данных, `orthrus/genbench.py`); результаты печатаются строками `BENCH {...}` и
+сохраняются в `bench/` в бакете.
 
 ### Проверенная среда g2.1 (пробы `jobs/probe-*.yaml`, 2026-10-08)
 

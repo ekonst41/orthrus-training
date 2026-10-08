@@ -30,8 +30,9 @@ WEIGHTS, OPTIMIZER, STATE = "trainable.safetensors", "optimizer.pt", "trainer_st
 def load_model(cfg: ModelConfig, device: torch.device, dtype: torch.dtype = torch.bfloat16):
     """Orthrus from a plain Qwen3 checkpoint (diffusion twins warm-started from the AR weights) or
     from an exported Orthrus model (twins loaded). Returns (model, tokenizer, trainable params)."""
-    tokenizer = AutoTokenizer.from_pretrained(cfg.base)
-    config = AutoConfig.from_pretrained(cfg.base)
+    revision = None if Path(cfg.base).exists() else cfg.revision  # Hub commit (local dirs: None)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.base, revision=revision)
+    config = AutoConfig.from_pretrained(cfg.base, revision=revision)
     if config.model_type != "qwen3":
         raise ValueError(f"{cfg.base} is a {config.model_type} model; this code supports Qwen3")
     config.block_size = getattr(config, "block_size", None) or cfg.block_size
@@ -44,6 +45,7 @@ def load_model(cfg: ModelConfig, device: torch.device, dtype: torch.dtype = torc
 
     model, info = OrthrusLM.from_pretrained(
         cfg.base,
+        revision=revision,
         config=config,
         dtype=dtype,
         attn_implementation=cfg.attn_implementation,
@@ -142,6 +144,13 @@ class CheckpointManager:
             for old in stale:
                 shutil.rmtree(old, ignore_errors=True)
         log.info("checkpoint step %d saved to %s", step, path)
+        return path
+
+    def get(self, name: str) -> Path:
+        """A checkpoint by name ("step-0001000"), downloaded from the bucket if not local."""
+        path = self.root / name
+        if not (path / STATE).exists() and not self.bucket.download(f"{self.remote}/{name}", path):
+            raise FileNotFoundError(f"no checkpoint {name} locally or in the bucket")
         return path
 
     def latest(self) -> Path | None:

@@ -27,7 +27,7 @@ from transformers import AutoTokenizer, GenerationConfig
 
 from orthrus.config import DatagenConfig, parse_args
 from orthrus.storage import Bucket
-from orthrus.tracking import Tracker, write_manifest
+from orthrus.tracking import Tracker, Watchdog, restore_history, write_manifest
 
 log = logging.getLogger("orthrus.datagen")
 
@@ -62,7 +62,7 @@ def sample_prompts(cfg: DatagenConfig, tokenizer) -> tuple[list[dict], list[dict
     interleaved across domains, so every prefix of the shards stays 1:1:1.
     """
     api, fs = HfApi(), HfFileSystem()
-    revision = api.dataset_info(cfg.source).sha
+    revision = cfg.source_revision or api.dataset_info(cfg.source).sha
     files = [
         f
         for f in api.list_repo_files(cfg.source, repo_type="dataset", revision=revision)
@@ -103,9 +103,9 @@ def sample_prompts(cfg: DatagenConfig, tokenizer) -> tuple[list[dict], list[dict
     return train, eval_prompts, revision
 
 
-def end_tokens(model: str, tokenizer) -> tuple[set[int], int]:
+def end_tokens(model: str, tokenizer, revision: str | None = None) -> tuple[set[int], int]:
     """(ids that end a response, the end-of-turn id <|im_end|>)."""
-    eos = set(GenerationConfig.from_pretrained(model).eos_token_id or [])
+    eos = set(GenerationConfig.from_pretrained(model, revision=revision).eos_token_id or [])
     end_of_turn = tokenizer.convert_tokens_to_ids("<|im_end|>")
     return eos | {end_of_turn}, end_of_turn
 
@@ -116,12 +116,14 @@ def selected_prompts(cfg, tokenizer, bucket: Bucket, out_dir: Path) -> tuple[lis
     d, path = cfg.datagen, out_dir / "prompts.parquet"
     key = {
         "source": d.source,
+        "source_revision": d.source_revision,
         "domains": list(d.domains),
         "samples_per_domain": d.samples_per_domain,
         "eval_prompts_per_domain": d.eval_prompts_per_domain,
         "max_prompt_tokens": d.max_prompt_tokens,
         "seed": d.seed,
         "tokenizer": cfg.model.base,
+        "tokenizer_revision": cfg.model.revision,
     }
     remote = f"data/{cfg.data.dataset}/prompts.parquet"
     if not path.exists():
@@ -162,6 +164,8 @@ def build_engine(cfg, **overrides):
     d = cfg.datagen
     kwargs = {
         "model": cfg.model.base,
+        "revision": cfg.model.revision,
+        "tokenizer_revision": cfg.model.revision,
         "dtype": "bfloat16",
         "seed": d.seed,
         "max_model_len": d.max_prompt_tokens + d.max_new_tokens,
@@ -188,6 +192,39 @@ def sampling_params(cfg, eos: set[int], detokenize: bool = False):
     )
 
 
+ENGINE_COUNTERS = (
+    "vllm:num_preemptions",
+    "vllm:generation_tokens",
+    "vllm:prompt_tokens",
+    "vllm:spec_decode_num_drafts",
+    "vllm:spec_decode_num_draft_tokens",
+    "vllm:spec_decode_num_accepted_tokens",
+)
+
+
+def engine_counters(llm) -> dict:
+    """Cumulative vLLM counters (needs disable_log_stats=False), summed over label sets."""
+    totals: dict = {}
+    for metric in llm.get_metrics():
+        if metric.name in ENGINE_COUNTERS and hasattr(metric, "value"):
+            totals[metric.name] = totals.get(metric.name, 0) + metric.value
+    return totals
+
+
+def counter_metrics(before: dict, after: dict) -> dict:
+    """Preemptions and speculative-decoding acceptance between two counter snapshots."""
+    delta = {k: after.get(k, 0) - before.get(k, 0) for k in after}
+    metrics = {"datagen/preemptions": delta.get("vllm:num_preemptions", 0)}
+    drafts = delta.get("vllm:spec_decode_num_drafts", 0)
+    if drafts:
+        accepted = delta.get("vllm:spec_decode_num_accepted_tokens", 0)
+        metrics["datagen/mean_acceptance_length"] = 1 + accepted / drafts
+        metrics["datagen/draft_acceptance_rate"] = accepted / max(
+            delta.get("vllm:spec_decode_num_draft_tokens", 0), 1
+        )
+    return metrics
+
+
 def responses(outputs, eos: set[int], end_of_turn: int) -> tuple[list[list[int]], list[str]]:
     """Token ids and finish reasons of vLLM outputs; a finished turn always ends with an end id."""
     ids_list, reasons = [], []
@@ -212,8 +249,9 @@ def main(argv: list[str] | None = None) -> None:
     raw_dir.mkdir(parents=True, exist_ok=True)
     remote = f"data/{cfg.data.dataset}"
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model.base)
-    eos, end_of_turn = end_tokens(cfg.model.base, tokenizer)
+    watchdog = Watchdog(d.stall_minutes, "finished shard")
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model.base, revision=cfg.model.revision)
+    eos, end_of_turn = end_tokens(cfg.model.base, tokenizer, cfg.model.revision)
     train, eval_prompts, revision = selected_prompts(cfg, tokenizer, bucket, out_dir)
     with (out_dir / "eval_prompts.jsonl").open("w", encoding="utf-8") as file:
         file.writelines(json.dumps(p) + "\n" for p in eval_prompts)
@@ -222,11 +260,12 @@ def main(argv: list[str] | None = None) -> None:
     write_manifest(
         out_dir / "manifest.json",
         cfg,
+        lock="datagen",
         kind="datagen",
         source=d.source,
         source_revision=revision,
         model=cfg.model.base,
-        model_revision=HfApi().model_info(cfg.model.base).sha,
+        model_revision=cfg.model.revision or HfApi().model_info(cfg.model.base).sha,
         train_prompts=len(train),
         eval_prompts=len(eval_prompts),
         shards=shards,
@@ -248,15 +287,21 @@ def main(argv: list[str] | None = None) -> None:
 
     from vllm.inputs import TokensPrompt
 
-    llm = build_engine(cfg)
+    llm = build_engine(cfg, disable_log_stats=False)  # counters for preemptions / acceptance
     params = sampling_params(cfg, eos)
+    restore_history(bucket, f"{remote}/datagen_metrics.jsonl", out_dir / "datagen_metrics.jsonl")
     tracker = Tracker(cfg, out_dir, "datagen")
     for index in todo:
+        watchdog.beat()
         if d.max_hours and time.time() - started > d.max_hours * 3600:
             log.info("time budget reached; rerun to continue")
             break
+        if bucket.exists(f"{remote}/STOP"):  # scripts/ds.py stop data/<dataset>
+            log.warning("stop requested (%s/STOP); rerun to continue", remote)
+            bucket.delete(f"{remote}/STOP")
+            break
         batch = train[index * d.shard_size : (index + 1) * d.shard_size]
-        start = time.perf_counter()
+        start, counters = time.perf_counter(), engine_counters(llm)
         outputs = llm.generate(
             [TokensPrompt(prompt_token_ids=p["prompt_ids"]) for p in batch], params, use_tqdm=False
         )
@@ -281,6 +326,7 @@ def main(argv: list[str] | None = None) -> None:
                 "datagen/mean_response_tokens": generated / len(batch),
                 "datagen/truncated_fraction": reasons.count("length") / len(batch),
                 "datagen/shard_minutes": seconds / 60,
+                **counter_metrics(counters, engine_counters(llm)),
             },
             step=index,
         )

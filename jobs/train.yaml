@@ -20,8 +20,8 @@ env:
     requirements-file: requirements/train.txt
     local-paths:
       - orthrus
-graceful-shutdown:          # cancel sends SIGTERM: the trainer saves and uploads a checkpoint
-  signal: SIGTERM
+graceful-shutdown:          # requested, but a cancel killed probe jobs ~20 s later regardless:
+  signal: SIGTERM           # stop cleanly with `scripts/ds.py stop runs/<run>` instead
   timeout: 5m
 cloud-instance-types:
   - g2.1

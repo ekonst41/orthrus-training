@@ -110,8 +110,8 @@ def worker(cfg, name: str, prompts_path: Path, out_dir: Path) -> None:
     from vllm.inputs import TokensPrompt
 
     variant = VARIANTS[name]
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model.base)
-    eos, end_of_turn = end_tokens(cfg.model.base, tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model.base, revision=cfg.model.revision)
+    eos, end_of_turn = end_tokens(cfg.model.base, tokenizer, cfg.model.revision)
     table = pq.read_table(prompts_path)
     prompts = table.column("prompt_ids").to_pylist()
     domains = table.column("domain").to_pylist()
@@ -236,7 +236,7 @@ def main(argv: list[str] | None = None) -> None:
 
     out_dir = Path(cfg.storage.local_dir) / "genbench"
     out_dir.mkdir(parents=True, exist_ok=True)
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model.base)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model.base, revision=cfg.model.revision)
     d = dataclasses.replace(cfg.datagen, samples_per_domain=known.prompts_per_domain)
     train, _, revision = sample_prompts(d, tokenizer)  # same order as the full run's first shard
     prompts_path = out_dir / "prompts.parquet"

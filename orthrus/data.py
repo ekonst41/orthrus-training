@@ -32,6 +32,14 @@ def fetch_raw(bucket: Bucket, dataset: str, local_root: Path) -> Path:
     return raw_dir
 
 
+def load_manifest(bucket: Bucket, dataset: str, local_root: Path) -> dict:
+    """datagen's manifest of the dataset ({} if there is none, e.g. hand-made test data)."""
+    path = local_root / "data" / dataset / "manifest.json"
+    if not path.exists():
+        bucket.download_file(f"data/{dataset}/manifest.json", path)
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
 def pack(raw_dir: Path, seq_len: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
     """Pack all raw shards into (input_ids int32 [rows, seq_len], assistant_mask uint8)."""
     files = sorted(raw_dir.glob("*.parquet"))

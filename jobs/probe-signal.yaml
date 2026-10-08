@@ -1,0 +1,13 @@
+# Graceful-shutdown probe (CPU, no dependencies): cancel the job and check that the Python process
+# behind `timeout` receives SIGTERM and DataSphere waits for it (result: it does not, see script).
+# python scripts/ds.py run jobs/probe-signal.yaml --max-minutes 25, then ds.py cancel <job_id>
+name: orthrus-probe-signal
+desc: Does a cancel reach the Python process through timeout (SIGTERM)?
+cmd: bash -c "timeout --kill-after=1m 22m python3 scripts/probe_signal.py"
+inputs:
+  - scripts/probe_signal.py
+graceful-shutdown:
+  signal: SIGTERM
+  timeout: 2m
+cloud-instance-types:
+  - c1.4

@@ -1,10 +1,12 @@
-# Speed evaluation of the exported model: TPF, acceptance length, AR parity, wall-clock speedup.
-# python scripts/ds.py run jobs/eval.yaml --max-minutes 240
+# Evaluation of the exported model: TPF, acceptance length, AR parity, wall-clock speedup, on 32
+# prompts per suite (held-out + 4 benchmarks), 512 new tokens, fp32 (exact AR parity), ~45 min.
+# A training checkpoint instead of the export: append eval.checkpoint=step-0002000 (or latest).
+# python scripts/ds.py run jobs/eval.yaml --max-minutes 120
 name: orthrus-eval
-desc: Orthrus speed evaluation on held-out prompts and benchmarks (results to the HF bucket)
+desc: Orthrus evaluation on held-out prompts and benchmarks (results to the HF bucket)
 cmd: >-
-  timeout --kill-after=10m 4h python3 -m orthrus.evaluate --config configs/qwen3-0.6b.yaml
-  eval.prompts=100 eval.max_new_tokens=1024
+  timeout --kill-after=5m 110m python3 -m orthrus.evaluate --config configs/qwen3-0.6b.yaml
+  eval.max_new_tokens=512 eval.dtype=float32
 inputs:
   - configs/qwen3-0.6b.yaml
   - requirements/train.txt
