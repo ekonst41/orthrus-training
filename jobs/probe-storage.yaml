@@ -1,0 +1,15 @@
+# Storage probe: HF token rights and HF Storage Bucket upload/download speed from DataSphere.
+# Run from the repo root: python scripts/ds.py run jobs/probe-storage.yaml --max-minutes 60
+# Needs the DataSphere project secret HF_TOKEN (injected into the job environment).
+name: orthrus-probe-storage
+desc: HF token rights and HF Storage Bucket throughput (1 GiB checkpoint-like upload/download)
+# `timeout` is a hard stop inside the job; --max-minutes in ds.py also cancels it from outside.
+cmd: timeout 30m bash scripts/probe_storage.sh ${REPORT}
+inputs:
+  - scripts/probe_storage.sh
+  - scripts/probe_storage.py
+  - requirements/train.txt
+outputs:
+  - outputs/probe_storage.json: REPORT
+cloud-instance-types:
+  - g2.1
