@@ -71,7 +71,14 @@ def evaluation_loss(model, ids, mask, cfg: Config, device: torch.device) -> dict
         )
         with torch.autocast(device.type, torch.bfloat16, enabled=device.type == "cuda"):
             _, stats = orthrus_loss(
-                model, batch_ids, batch_mask, anchors, valid, cfg.train.kl_chunk_size
+                model,
+                batch_ids,
+                batch_mask,
+                anchors,
+                valid,
+                cfg.train.kl_chunk_size,
+                cfg.train.compile,
+                cfg.train.flex_kernel_options,
             )
         for key in ("kl_sum", "tokens", "agree", "agree_by_offset", "tokens_by_offset"):
             sums[key] = sums[key] + stats[key]
@@ -230,7 +237,14 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 with torch.autocast(device.type, torch.bfloat16, enabled=device.type == "cuda"):
                     loss, stats = orthrus_loss(
-                        model, batch_ids, batch_mask, anchors, valid, t.kl_chunk_size
+                        model,
+                        batch_ids,
+                        batch_mask,
+                        anchors,
+                        valid,
+                        t.kl_chunk_size,
+                        t.compile,
+                        t.flex_kernel_options,
                     )
                 (loss / accum).backward()
                 for key in ("kl_sum", "tokens", "agree", "agree_by_offset", "tokens_by_offset"):

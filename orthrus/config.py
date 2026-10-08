@@ -48,6 +48,8 @@ class TrainConfig:
     num_anchor_blocks: int = 256  # blocks per sequence, paper
     kl_chunk_size: int = 2048  # rows per vocabulary projection chunk in the KL loss
     activation_checkpointing: bool = False
+    compile: bool = True  # GPU: torch.compile each decoder layer and the fused KL (same math)
+    flex_kernel_options: dict = field(default_factory=dict)  # FlexAttention kernel settings
     seed: int = 42
     max_steps: int = 0  # stop after this many optimizer steps (0: run all epochs)
     max_hours: float = 0  # stop and save before this wall-clock budget (0: no limit)
