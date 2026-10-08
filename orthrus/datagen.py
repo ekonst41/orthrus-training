@@ -12,9 +12,12 @@ import itertools
 import json
 import logging
 import os
+import sys
 import time
+import traceback
 from pathlib import Path
 
+import psutil
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -220,5 +223,24 @@ def main(argv: list[str] | None = None) -> None:
     tracker.close()
 
 
+def exit_now(code: int = 0) -> None:
+    """Exit without interpreter teardown, which hung on DataSphere after the last shard (vLLM's
+    engine process kept the job alive with the GPU idle). Everything is uploaded by now."""
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    for child in psutil.Process().children(recursive=True):
+        try:
+            child.kill()
+        except psutil.Error:
+            pass
+    os._exit(code)
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
+        exit_now(1)
+    exit_now()

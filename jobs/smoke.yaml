@@ -5,7 +5,7 @@ name: orthrus-smoke
 desc: End-to-end smoke test of datagen, training and evaluation on tiny data
 cmd: >-
   bash -c "python3 -m pip install -q --no-deps -r requirements/datagen-urls.txt &&
-  timeout 50m bash -c 'python3 -m orthrus.datagen --config configs/smoke.yaml &&
+  timeout 50m bash -c 'timeout --kill-after=1m 20m python3 -m orthrus.datagen --config configs/smoke.yaml &&
   python3 -m orthrus.train --config configs/smoke.yaml &&
   python3 -m orthrus.evaluate --config configs/smoke.yaml'"
 inputs:
