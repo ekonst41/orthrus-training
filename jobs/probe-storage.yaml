@@ -11,5 +11,8 @@ inputs:
   - requirements/train.txt
 outputs:
   - outputs/probe_storage.json: REPORT
+# No GPU needed: throughput to HF is bound by the internet path, and CPU VMs are cheap and
+# available when A100s are not (g2.1 allocation failed on 2026-10-08 09:45).
 cloud-instance-types:
-  - g2.1
+  - c1.8
+  - c1.4
