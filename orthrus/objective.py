@@ -7,10 +7,14 @@ cache, and every masked position is distilled to the AR distribution at the same
 (the last block position has no target inside the block, as in the official code and inference).
 """
 
+import logging
+
 import torch
 import torch.nn.functional as F
 
 from orthrus.modeling_orthrus import OrthrusLM, build_block_mask
+
+log = logging.getLogger(__name__)
 
 
 def sample_anchors(
@@ -86,11 +90,19 @@ def diffusion_states(
     return student, teacher
 
 
+_FP32_OUTPUT = True  # cleared if this torch/GPU lacks bf16 -> fp32 matmul output
+
+
 def _logits(hidden: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     """Vocabulary logits in fp32. On GPU bf16 inputs accumulate and land in fp32 directly (no bf16
     output rounding of the distillation targets); CPU tests run in fp32 anyway."""
-    if hidden.is_cuda and hidden.dtype in (torch.bfloat16, torch.float16):
-        return torch.mm(hidden, weight.t(), out_dtype=torch.float32)
+    global _FP32_OUTPUT
+    if _FP32_OUTPUT and hidden.is_cuda and hidden.dtype in (torch.bfloat16, torch.float16):
+        try:
+            return torch.mm(hidden, weight.t(), out_dtype=torch.float32)
+        except (RuntimeError, NotImplementedError) as error:
+            _FP32_OUTPUT = False
+            log.warning("fp32-output matmul unavailable (%s): using bf16 logits", error)
     return (hidden @ weight.t()).float()
 
 

@@ -29,7 +29,7 @@ def load_eval_prompts(bucket: Bucket, dataset: str, local_root: Path) -> list[di
     """Held-out prompts written by datagen (never trained on): [{"domain", "prompt_ids"}, ...]."""
     path = local_root / "data" / dataset / "eval_prompts.jsonl"
     if bucket.enabled and not path.exists():
-        bucket.download(f"data/{dataset}/eval_prompts.jsonl", path.parent)
+        bucket.download_file(f"data/{dataset}/eval_prompts.jsonl", path)
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]

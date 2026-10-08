@@ -14,7 +14,13 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from huggingface_hub import batch_bucket_files, bucket_info, list_bucket_tree, sync_bucket
+from huggingface_hub import (
+    batch_bucket_files,
+    bucket_info,
+    download_bucket_files,
+    list_bucket_tree,
+    sync_bucket,
+)
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +57,14 @@ class Bucket:
             return False
         local.mkdir(parents=True, exist_ok=True)
         sync_bucket(self.url(remote), str(local), quiet=True)
+        return True
+
+    def download_file(self, remote: str, local: Path) -> bool:
+        """Download one file; False if it does not exist."""
+        if remote.strip("/") not in self.list(remote):
+            return False
+        local.parent.mkdir(parents=True, exist_ok=True)
+        download_bucket_files(self.bucket_id, files=[(remote.strip("/"), str(local))])
         return True
 
     def upload(self, local: Path, remote: str) -> None:
