@@ -1,0 +1,30 @@
+# Training-step benchmark (orthrus/bench.py, suite `speedups`; `--suite variants` is the first
+# survey), then 12 real training steps without the bucket as an end-to-end check (~20 min).
+# python scripts/ds.py run jobs/bench.yaml --max-minutes 55
+name: orthrus-bench
+desc: Training-step speed benchmark (results to bench/ in the HF bucket)
+cmd: >-
+  timeout --kill-after=2m 50m bash -c
+  "python3 -m orthrus.bench --config configs/smoke.yaml --suite speedups &&
+  python3 -m orthrus.train --config configs/smoke.yaml run_name=smoke-speed storage.bucket=
+  train.max_steps=12 train.eval_every=6 train.save_every=6"
+inputs:
+  - configs/smoke.yaml
+  - requirements/train.txt
+env:
+  vars:
+    - HF_HUB_DISABLE_PROGRESS_BARS: 1
+    - TOKENIZERS_PARALLELISM: "false"
+    - PYTHONUNBUFFERED: 1
+    - PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    - ORTHRUS_BUCKET
+    - ORTHRUS_TRACKIO_SPACE
+    - ORTHRUS_GIT_COMMIT
+  python:
+    type: manual
+    version: 3.12
+    requirements-file: requirements/train.txt
+    local-paths:
+      - orthrus
+cloud-instance-types:
+  - g2.1

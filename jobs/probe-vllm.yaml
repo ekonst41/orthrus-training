@@ -1,0 +1,21 @@
+# vLLM probe: CUDA 12.9 vLLM wheel on the A100 driver, Qwen3-0.6B generation throughput.
+# Run from the repo root: python scripts/ds.py run jobs/probe-vllm.yaml --max-minutes 60
+name: orthrus-probe-vllm
+desc: vLLM 0.31 (cu129 wheel) startup and Qwen3-0.6B generation throughput
+# `timeout` is a hard stop inside the job; --max-minutes in ds.py also cancels it from outside.
+cmd: timeout 50m python3 -m probe_vllm ${REPORT}
+inputs:
+  - requirements/datagen-urls.txt  # vLLM wheel URL, installed with --no-deps by the script
+env:
+  vars:
+    - PYTHONUNBUFFERED: 1
+  python:
+    type: manual
+    version: 3.12
+    requirements-file: requirements/datagen.txt
+    local-paths:
+      - scripts/probe_vllm.py
+outputs:
+  - outputs/probe_vllm.json: REPORT
+cloud-instance-types:
+  - g2.1

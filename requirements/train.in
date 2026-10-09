@@ -1,0 +1,7 @@
+# Training and evaluation on CUDA GPUs (DataSphere jobs or any Linux GPU server).
+# DataSphere A100 hosts run NVIDIA driver 535 (CUDA 12.2): PyPI torch 2.13 is built for CUDA 13
+# (needs driver >= 580), so torch comes from the PyTorch CUDA 12.9 index (minor-version compatible).
+--extra-index-url https://download.pytorch.org/whl/cu129
+-r base.in
+torch==2.13.0+cu129  # same torch as vllm==0.31.0 (requirements/datagen.in)
+trackio[gpu]>=0.41  # experiment tracking backed by the HF bucket (gpu extra: GPU metrics)

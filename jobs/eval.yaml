@@ -1,0 +1,28 @@
+# Evaluation of the exported model: TPF, acceptance length, AR parity, wall-clock speedup, on 32
+# prompts per suite (held-out + 4 benchmarks), 512 new tokens, fp32 (exact AR parity), ~45 min.
+# A training checkpoint instead of the export: append eval.checkpoint=step-0002000 (or latest).
+# python scripts/ds.py run jobs/eval.yaml --max-minutes 120
+name: orthrus-eval
+desc: Orthrus evaluation on held-out prompts and benchmarks (results to the HF bucket)
+cmd: >-
+  timeout --kill-after=5m 110m python3 -m orthrus.evaluate --config configs/qwen3-0.6b.yaml
+  eval.max_new_tokens=512 eval.dtype=float32
+inputs:
+  - configs/qwen3-0.6b.yaml
+  - requirements/train.txt
+env:
+  vars:
+    - HF_HUB_DISABLE_PROGRESS_BARS: 1
+    - TOKENIZERS_PARALLELISM: "false"
+    - PYTHONUNBUFFERED: 1
+    - ORTHRUS_BUCKET
+    - ORTHRUS_TRACKIO_SPACE
+    - ORTHRUS_GIT_COMMIT
+  python:
+    type: manual
+    version: 3.12
+    requirements-file: requirements/train.txt
+    local-paths:
+      - orthrus
+cloud-instance-types:
+  - g2.1
