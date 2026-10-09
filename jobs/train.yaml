@@ -1,5 +1,6 @@
 # Train the diffusion view; continues from the newest checkpoint of the run in the bucket.
-# Rerun the same job to continue after train.max_hours. python scripts/ds.py run jobs/train.yaml
+# Rerun the same job to continue after train.max_hours (2 epochs ~29 h: two jobs).
+# python scripts/ds.py run jobs/train.yaml --max-minutes 1400 --retry-minutes 120
 name: orthrus-train
 desc: Orthrus training (paper recipe, Qwen3-0.6B); resumable, checkpoints in the HF bucket
 cmd: timeout --kill-after=10m 23h python3 -m orthrus.train --config configs/qwen3-0.6b.yaml
@@ -11,6 +12,7 @@ env:
     - HF_HUB_DISABLE_PROGRESS_BARS: 1
     - TOKENIZERS_PARALLELISM: "false"
     - PYTHONUNBUFFERED: 1
+    - PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True  # official code; less fragmentation
     - ORTHRUS_BUCKET          # value from the local environment (.env, set by scripts/ds.py)
     - ORTHRUS_TRACKIO_SPACE
     - ORTHRUS_GIT_COMMIT
