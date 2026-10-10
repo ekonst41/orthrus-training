@@ -1,0 +1,31 @@
+# The decoding-cycle experiment of configs/decode/tail-v1.yaml on our own Qwen3-0.6B (the export of
+# run qwen3-0.6b-paper in the bucket; its weights' sha256 goes to model.json): the same prompts as
+# the official 1.7B (11 per suite), strategies and checks. Job: jobs/final-eval.yaml.
+# Analysis: python -m orthrus.decode_report --config configs/decode/tail-v1-0.6b.yaml
+run_name: decode-tail-v1-qwen3-0.6b
+
+model:
+  block_size: 32            # shared settings; decode.models picks the checkpoints
+
+data:
+  dataset: nemotron-v2-qwen3-0.6b  # held-out chat prompts of the prompt set (--build-prompts)
+
+decode:
+  models:
+    - {tag: qwen3-0.6b, base: "bucket:runs/qwen3-0.6b-paper/final"}
+  prompt_set: decode-v1
+  prompt_set_sha256: 16f6056cf3233022921cf40cc81862b84293b6a586c196764b0c9619f28785e0
+  suites: [gsm8k, math500, humaneval, mbpp, chat]
+  prompts_per_suite: 11     # the prompts of the official 1.7B in decode-tail-v1
+  max_minutes: 20           # guard; 11 rounds take ~10 min
+  max_new_tokens: 512
+  dtype: float32
+  strategies:               # replayed on every prompt
+    - {name: base}                                           # paper: draft -> verify
+    - {name: tail-s0, kind: tail, shifts: [0]}               # + verify the rest of the block
+    - {name: tail-tree, kind: tail, shifts: [1, 0, -1, -2]}  # + the same with shifted copies
+    - {name: tail-tree-gated, kind: tail, shifts: [1, 0, -1, -2], min_expected: 4}
+    - {name: reuse-tree, kind: reuse, shifts: [1, 0, -1, -2]}  # tail tried in the next verify
+  check_rounds: 1           # round 0: these also decode for real (replay check on the GPU)
+  check_strategies: [tail-tree, reuse-tree]
+  ar_prompts: 1             # and one prompt per model with plain AR (losslessness)

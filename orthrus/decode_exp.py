@@ -77,6 +77,9 @@ REVISIONS = {
     "humaneval": "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544",
     "mbpp": "4bb6404fdc6cacfda99d4ac4205087b89d32030c",
 }
+BUCKET_PREFIX = (
+    "bucket:"  # decode.models base: an export in our bucket, e.g. bucket:runs/<run>/final
+)
 SET_SIZE = 128  # prompts stored per suite; a run takes the first decode.prompts_per_suite
 SET_SEED = 42
 TURN = re.compile(r"<\|im_start\|>(system|user|assistant)\n(.*?)<\|im_end\|>\n", re.S)
@@ -349,10 +352,12 @@ class Prefetcher:
     /dev/shm (RAM) when it has room; a checkpoint that does not fit anywhere is skipped with an
     error instead of failing the job (the other models go on)."""
 
-    def __init__(self, specs: list[tuple[str, ModelConfig]]):
+    def __init__(self, specs: list[tuple[str, ModelConfig]], bucket: Bucket, local_root: Path):
         self.ready = {tag: threading.Event() for tag, _ in specs}
         self.local: dict[str, Path] = {}  # tag -> downloaded snapshot directory
         self.failed: dict[str, str] = {}
+        self._bucket, self._local_root = bucket, local_root
+        self._delete: dict[str, Path] = {}
         self._released = {tag: threading.Event() for tag, _ in specs}
         threading.Thread(target=self._work, args=(specs,), daemon=True).start()
 
@@ -375,7 +380,14 @@ class Prefetcher:
         skip = ["*.png", "*.md"]
         for tag, spec in specs:
             try:
-                if not Path(spec.base).exists():
+                if spec.base.startswith(BUCKET_PREFIX):  # an export of our own runs
+                    remote = spec.base[len(BUCKET_PREFIX) :]
+                    target = self._local_root / "models" / tag
+                    log.info("downloading %s from the bucket", remote)
+                    if not self._bucket.download(remote, target):
+                        raise FileNotFoundError(f"bucket has no {remote}")
+                    self.local[tag] = self._delete[tag] = target
+                elif not Path(spec.base).exists():
                     info = HfApi().model_info(
                         spec.base, revision=spec.revision, files_metadata=True
                     )
@@ -390,6 +402,7 @@ class Prefetcher:
                             spec.base, revision=spec.revision, cache_dir=cache, ignore_patterns=skip
                         )
                     )
+                    self._delete[tag] = self.local[tag].parents[1]  # models--<org>--<name>
             except Exception as error:
                 log.error("%s (%s) skipped: %s", tag, spec.base, error)
                 self.failed[tag] = str(error)
@@ -400,8 +413,8 @@ class Prefetcher:
     def release(self, tag: str) -> None:
         """The model is in memory: delete its downloaded files, start the next download."""
         gc.collect()  # drop memory maps of the checkpoint files
-        if tag in self.local:
-            shutil.rmtree(self.local[tag].parents[1], ignore_errors=True)  # models--<org>--<name>
+        if tag in self._delete:
+            shutil.rmtree(self._delete[tag], ignore_errors=True)
         self._released[tag].set()
 
 
@@ -450,6 +463,14 @@ def _load(m: _Model, local: Path | None, warm_up: list, cfg: Config, device, dty
 
     spec = dataclasses.replace(m.spec, base=str(local)) if local else m.spec  # the downloaded files
     model, tokenizer, _ = load_model(spec, device, dtype)
+    weights = {}
+    if m.spec.base.startswith(BUCKET_PREFIX):  # a mutable export: pin what was decoded
+        for path in sorted(local.glob("*.safetensors")):
+            digest = hashlib.sha256()
+            with path.open("rb") as file:
+                for chunk in iter(lambda f=file: f.read(2**24), b""):
+                    digest.update(chunk)
+            weights[path.name] = digest.hexdigest()
     m.model, m.eos = model.eval(), eos_token_ids(model, tokenizer)
     for p in (p for items in by_suite.values() for p in items):
         if chat_ids(tokenizer, p["messages"]) != p["prompt_ids"]:
@@ -458,6 +479,7 @@ def _load(m: _Model, local: Path | None, warm_up: list, cfg: Config, device, dty
         "tag": m.tag,
         **dataclasses.asdict(m.spec),
         "commit": getattr(model.config, "_commit_hash", None),
+        "weights_sha256": weights,
         "eos_token_ids": sorted(m.eos),
         "block_size": model.config.block_size,
         "mask_token_id": model.config.mask_token_id,
@@ -501,7 +523,9 @@ def run(cfg: Config) -> None:
     rounds = min(len(v) for v in by_suite.values())
     if rounds == 0:
         raise ValueError(f"the prompt set lacks some of the suites {d.suites}")
-    prefetch = Prefetcher([(m.tag, m.spec) for m in models if m.next_round < rounds])
+    prefetch = Prefetcher(
+        [(m.tag, m.spec) for m in models if m.next_round < rounds], bucket, run_dir / "_downloads"
+    )
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest = run_dir / "run.json"
     if not manifest.exists():

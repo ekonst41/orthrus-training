@@ -158,3 +158,26 @@ def test_bootstrap_paired_difference_is_exact_for_identical_rows():
     avg = decode_report.bootstrap_avg([(tokens, passes), (tokens, passes)])
     assert avg[0]["change_pct"] == 0
     assert avg[1]["change_pct"] == pytest.approx(100 * (60 / 19 / 3 - 1))
+
+
+def test_model_from_the_bucket_is_pinned_and_released(setup, monkeypatch):
+    tmp_path, digest, loaded = setup
+    downloads = []
+
+    def fake_download(self, remote, local):
+        local.mkdir(parents=True, exist_ok=True)
+        (local / "model.safetensors").write_bytes(b"weights")
+        downloads.append((remote, local))
+        return True
+
+    monkeypatch.setattr("orthrus.storage.Bucket.download", fake_download)
+    own = [{"tag": "own", "base": "bucket:runs/demo/final"}]
+    cfg = _config(
+        tmp_path, digest, f"decode.models={json.dumps(own)}", "decode.prompts_per_suite=1"
+    )
+    decode_exp.run(cfg)
+    ((remote, local),) = downloads
+    assert remote == "runs/demo/final" and not local.exists()  # released after loading
+    assert loaded == [str(local)]
+    info = json.loads((tmp_path / "experiments" / "exp" / "own" / "model.json").read_text())
+    assert info["weights_sha256"] == {"model.safetensors": hashlib.sha256(b"weights").hexdigest()}

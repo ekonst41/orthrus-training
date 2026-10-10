@@ -94,7 +94,8 @@ class DecodeConfig:
     """Decoding-cycle experiments (orthrus.decode_exp, orthrus.decode_report)."""
 
     models: list = field(default_factory=list)  # [{tag, base, revision}, ...] overriding model
-    # per checkpoint, all decoded in one job ([]: the run's model)
+    # per checkpoint, all decoded in one job ([]: the run's model); base "bucket:runs/<run>/final"
+    # takes an export of our own run from the bucket
     prompt_set: str = "decode-v1"  # bucket experiments/prompts/<name>.jsonl (--build-prompts)
     prompt_set_sha256: str = ""  # pin: a run refuses a prompt set with another hash
     suites: tuple[str, ...] = ("gsm8k", "math500", "humaneval", "mbpp", "chat")
