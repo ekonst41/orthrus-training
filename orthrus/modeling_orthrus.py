@@ -169,7 +169,8 @@ class OrthrusAttention(Qwen3Attention):
 
         if flex_block_mask is not None:  # training / evaluation over many packed blocks
             output = diffusion_attention(query, keys, values, flex_block_mask).transpose(1, 2)
-        else:  # generation: one block sees the whole committed prefix and itself
+        else:  # generation: one block sees the whole committed prefix and itself; a dense 4D
+            # attention_mask instead packs many blocks into one pass (orthrus.decoding.draft_table)
             attention = ALL_ATTENTION_FUNCTIONS.get_interface(
                 self.config._attn_implementation, eager_attention_forward
             )
@@ -178,7 +179,7 @@ class OrthrusAttention(Qwen3Attention):
                 query,
                 keys,
                 values,
-                None,
+                attention_mask,
                 dropout=0.0,
                 scaling=self.scaling,
                 sliding_window=self.sliding_window,

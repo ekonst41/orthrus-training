@@ -1,0 +1,32 @@
+# Pilot of the decoding-cycle experiment: both official models, 2 prompts per suite, the full
+# strategy set and 1024 new tokens -- checks on the GPU (exact AR parity, replay, draft table) and
+# the time per prompt that sizes the full jobs. Results: experiments/decode-pilot-qwen3-*/.
+# python scripts/ds.py run jobs/decode-pilot.yaml --max-minutes 70 --retry-minutes 120
+name: orthrus-decode-pilot
+desc: Pilot of the Orthrus decoding-cycle experiment (1.7B and 4B, 2 prompts per suite)
+cmd: >-
+  timeout --kill-after=2m 60m bash -c
+  "python3 -m orthrus.decode_exp --config configs/decode/qwen3-1.7b.yaml
+  run_name=decode-pilot-qwen3-1.7b decode.prompts_per_suite=2 decode.ar_reference_prompts=1 &&
+  python3 -m orthrus.decode_exp --config configs/decode/qwen3-4b.yaml
+  run_name=decode-pilot-qwen3-4b decode.prompts_per_suite=2 decode.ar_reference_prompts=1"
+inputs:
+  - configs/decode/qwen3-1.7b.yaml
+  - configs/decode/qwen3-4b.yaml
+  - requirements/train.txt
+env:
+  vars:
+    - HF_HUB_DISABLE_PROGRESS_BARS: 1
+    - TOKENIZERS_PARALLELISM: "false"
+    - PYTHONUNBUFFERED: 1
+    - ORTHRUS_BUCKET
+    - ORTHRUS_TRACKIO_SPACE
+    - ORTHRUS_GIT_COMMIT
+  python:
+    type: manual
+    version: 3.12
+    requirements-file: requirements/train.txt
+    local-paths:
+      - orthrus
+cloud-instance-types:
+  - g2.1

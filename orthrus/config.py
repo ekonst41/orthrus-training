@@ -90,6 +90,23 @@ class DatagenConfig:
 
 
 @dataclass
+class DecodeConfig:
+    """Decoding-cycle experiments (orthrus.decode_exp, orthrus.decode_report)."""
+
+    prompt_set: str = "decode-v1"  # bucket experiments/prompts/<name>.jsonl (--build-prompts)
+    prompt_set_sha256: str = ""  # pin: a run refuses a prompt set with another hash
+    suites: tuple[str, ...] = ("gsm8k", "math500", "humaneval", "mbpp", "chat")
+    prompts_per_suite: int = 64  # first N of each suite in the prompt set (dev/test alternate)
+    max_new_tokens: int = 1024
+    dtype: str = "float32"  # fp32: every strategy reproduces the AR output exactly (bf16 ties)
+    strategies: list = field(default_factory=lambda: [{"name": "base"}])  # decoding.Strategy
+    # fields; the first must be kind base: its output is the reference of the others
+    ar_reference_prompts: int = 16  # per suite: also plain AR decoding (losslessness, AR time)
+    draft_table: bool = True  # drafts at every anchor: replay check and policy search offline
+    chunk_blocks: int = 64  # blocks per pass of the draft table
+
+
+@dataclass
 class StorageConfig:
     bucket: str | None = None  # HF Storage Bucket "user/name"; None: $ORTHRUS_BUCKET; "" disables
     local_dir: str = "runs"  # working directory for data, checkpoints and logs
@@ -111,6 +128,7 @@ class Config:
     train: TrainConfig = field(default_factory=TrainConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     datagen: DatagenConfig = field(default_factory=DatagenConfig)
+    decode: DecodeConfig = field(default_factory=DecodeConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
 
