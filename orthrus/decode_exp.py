@@ -39,8 +39,10 @@ import gc
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
+import sys
 import threading
 import time
 from pathlib import Path
@@ -605,8 +607,17 @@ def main(argv: list[str] | None = None) -> None:
     )
     if known.build_prompts:
         build_prompt_set(cfg)
-    else:
+        return
+    code = 0
+    try:
         run(cfg)
+    except BaseException:
+        log.exception("decode experiment failed")
+        code = 1
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)  # a download thread must not keep a paid GPU job alive (seen once)
 
 
 if __name__ == "__main__":
