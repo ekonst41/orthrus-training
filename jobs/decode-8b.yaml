@@ -1,0 +1,29 @@
+# Decoding-cycle experiment on the official Orthrus-Qwen3-8B (configs/decode/qwen3-8b.yaml):
+# 5 strategies x 5 suites x 64 prompts, fp32, results in experiments/<run_name>/ of the bucket.
+# A rerun continues with the first incomplete suite. Analysis on any machine:
+# python -m orthrus.decode_report --config configs/decode/qwen3-8b.yaml
+# python scripts/ds.py run jobs/decode-8b.yaml --max-minutes 440 --retry-minutes 120
+name: orthrus-decode-8b
+desc: Orthrus decoding cycles with tail verification, official Qwen3-8B, fp32
+cmd: >-
+  timeout --kill-after=5m 420m python3 -m orthrus.decode_exp
+  --config configs/decode/qwen3-8b.yaml
+inputs:
+  - configs/decode/qwen3-8b.yaml
+  - requirements/train.txt
+env:
+  vars:
+    - HF_HUB_DISABLE_PROGRESS_BARS: 1
+    - TOKENIZERS_PARALLELISM: "false"
+    - PYTHONUNBUFFERED: 1
+    - ORTHRUS_BUCKET
+    - ORTHRUS_TRACKIO_SPACE
+    - ORTHRUS_GIT_COMMIT
+  python:
+    type: manual
+    version: 3.12
+    requirements-file: requirements/train.txt
+    local-paths:
+      - orthrus
+cloud-instance-types:
+  - g2.1

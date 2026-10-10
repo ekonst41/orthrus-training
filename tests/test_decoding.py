@@ -234,3 +234,21 @@ def test_replay_from_draft_table_matches_real_decoding(model):
             assert real.tokens == reference
             oracle = OracleBackend(len(prompt), reference, *oracle_rows, model.config.block_size)
             assert _same_trace(real, decode(oracle, strategy, len(prompt), new, eos))
+
+
+def test_acceptance_ends_at_eos_even_if_the_ar_agrees_beyond(model):
+    """Exact drafts that run past the EOS: the AR view agrees with them, but only tokens up to
+    the EOS count as accepted, so real decoding and replay keep identical bookkeeping."""
+    prompt = _prompt(5)
+    free = ar_decode(ModelBackend(model, prompt), len(prompt), 50, set()).tokens
+    stop = free[20]
+    reference = free[: free.index(stop) + 1]
+    block = model.config.block_size
+    exact = [(free[i + 1 : i + block] + [7] * block)[: block - 1] for i in range(len(free))]
+    for strategy in STRATEGIES:
+        real = decode(ScriptedBackend(model, prompt, exact), strategy, len(prompt), 50, {stop})
+        oracle = OracleBackend(len(prompt), reference, exact, None, block)
+        assert real.tokens == reference
+        assert sum(real.accepted) + len(real.accepted) + 1 >= len(reference) - 1
+        if not strategy.needs_confidence:
+            assert _same_trace(real, decode(oracle, strategy, len(prompt), 50, {stop}))

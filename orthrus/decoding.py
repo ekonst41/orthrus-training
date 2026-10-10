@@ -333,14 +333,18 @@ class OracleBackend:
         return best + 1
 
 
-def _verify(backend, kind: str, start: int, root: int, hypotheses: list[Hypothesis]):
-    """Verify, keep the hypothesis with the most accepted tokens; (index, accepted, bonus)."""
+def _verify(backend, kind: str, start: int, root: int, hypotheses: list[Hypothesis], eos):
+    """Verify, keep the hypothesis with the most accepted tokens; (index, accepted, bonus).
+    Acceptance ends at an accepted EOS: tokens after the end of the output are not kept (the AR
+    view may well agree with them, but counting them would make the bookkeeping depend on it)."""
     preds = backend.verify(kind, start, root, hypotheses)
     best, best_accepted = 0, -1
     for index, (hypothesis, pred) in enumerate(zip(hypotheses, preds, strict=True)):
         accepted = 0
         while accepted < len(hypothesis.tokens) and hypothesis.tokens[accepted] == pred[accepted]:
             accepted += 1
+            if hypothesis.tokens[accepted - 1] in eos:
+                break
         if accepted > best_accepted:
             best, best_accepted = index, accepted
     backend.commit(best, best_accepted)
@@ -399,7 +403,7 @@ def decode(
         root = gen.tokens[-1]
         hypotheses = [backend.draft(start, root, block_len, strategy.needs_confidence)]
         hypotheses += [h for h in stale if h.tokens != hypotheses[0].tokens]
-        best, accepted, bonus = _verify(backend, "verify", start, root, hypotheses)
+        best, accepted, bonus = _verify(backend, "verify", start, root, hypotheses, eos)
         kept = hypotheses[best]
         gen.accepted.append(accepted)
         gen.branch.append(kept.shift)
@@ -415,7 +419,7 @@ def decode(
             ):
                 break
             tail_passes += 1
-            best, accepted, bonus = _verify(backend, "tail", start, gen.tokens[-1], hypotheses)
+            best, accepted, bonus = _verify(backend, "tail", start, gen.tokens[-1], hypotheses, eos)
             kept = hypotheses[best]
             longest = max(len(h.tokens) for h in hypotheses)
             gen.tails.append(

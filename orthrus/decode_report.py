@@ -43,6 +43,7 @@ log = logging.getLogger("orthrus.decode_report")
 PAPER_TPF = {  # arXiv 2605.12825, Table 1, T = 0 (benchmarks we also run)
     "1.7B": {"gsm8k": 4.20, "math500": 4.71, "humaneval": 2.75, "mbpp": 2.76},
     "4B": {"gsm8k": 4.91, "math500": 6.02, "humaneval": 3.57, "mbpp": 3.74},
+    "8B": {"gsm8k": 5.30, "math500": 6.35, "humaneval": 3.94, "mbpp": 3.95},
 }
 SHIFT_SETS = ((0,), (1,), (-1,), (1, 0), (0, -1), (1, 0, -1), (1, 0, -1, -2), (1, 0, -1, -2, -3))
 ANATOMY_SHIFTS = (1, 0, -1, -2, -3)

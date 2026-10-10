@@ -208,6 +208,12 @@ print(tokenizer.decode(model.generate(ids, max_new_tokens=256)[0]))  # дифф�
 (max-autotune выбирает те же конфиги, что и по умолчанию), `ROWS_GUARANTEED_SAFE` (даёт NaN).
 Micro-batch 8 быстрее на 2.5% при пике 72 ГБ (оставлен 4).
 
+## Эксперименты с циклом декодирования
+
+Можно ли поднять TPF, если после проверки блока отдельным AR-проходом проверить и отклонённый
+хвост блока (со сдвигом)? Стратегии, постановка, запуск и результаты — в
+[EXPERIMENTS.md](EXPERIMENTS.md).
+
 ## Структура
 
 ```text
@@ -224,8 +230,11 @@ orthrus/
   storage.py           HF Storage Bucket
   tracking.py          JSONL-метрики, паспорт запуска, прогресс DataSphere, сторож зависаний
   bench.py, genbench.py  замеры скорости обучения и генерации данных
+  decoding.py          стратегии цикла декодирования (base, tail, reuse) и их точное воспроизведение
+  decode_exp.py, decode_report.py  эксперименты с циклом декодирования (EXPERIMENTS.md)
   config.py            конфигурация
-configs/   эксперименты (qwen3-0.6b.yaml — рецепт статьи, smoke.yaml — быстрая проверка)
+configs/   эксперименты (qwen3-0.6b.yaml — рецепт статьи, smoke.yaml — быстрая проверка,
+           decode/ — эксперименты с циклом декодирования на официальных моделях)
 jobs/      задания DataSphere
 scripts/   ds.py (запуск заданий), lock.py (зависимости), пробы окружения
 tests/     тесты на CPU с крошечной моделью (pytest)
