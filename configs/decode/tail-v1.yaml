@@ -1,0 +1,36 @@
+# Decoding-cycle experiment: does a third pass that verifies the rejected tail of the draft block
+# raise TPF? All official Orthrus checkpoints of the paper in one job of at most ~1 GPU hour:
+#   python scripts/ds.py run jobs/decode-tail.yaml --max-minutes 62 --retry-minutes 120
+# Analysis (CPU, any time, also while the job runs; results arrive after every round):
+#   python -m orthrus.decode_report --config configs/decode/tail-v1.yaml
+# Greedy, batch 1, fp32: every strategy reproduces plain AR decoding exactly, so all strategies are
+# replayed from the draft tables of the base decodes (real decodes check the replay).
+run_name: decode-tail-v1
+
+model:
+  block_size: 32            # shared settings; decode.models picks the checkpoints
+
+data:
+  dataset: nemotron-v2-qwen3-0.6b  # held-out chat prompts of the prompt set (--build-prompts)
+
+decode:
+  models:                   # pinned Hub commits of chiennv/Orthrus-Qwen3-*
+    - {tag: qwen3-1.7b, base: chiennv/Orthrus-Qwen3-1.7B, revision: 7dc9735acb89bb17dd2f3c5689928707c1fb0868}
+    - {tag: qwen3-4b, base: chiennv/Orthrus-Qwen3-4B, revision: cd93cb32557a236f2f47f9ce3cc4c18303af3843}
+    - {tag: qwen3-8b, base: chiennv/Orthrus-Qwen3-8B, revision: 977a617772e91c966a8cd9b551f4151f9824b6fa}
+  prompt_set: decode-v1
+  prompt_set_sha256: 16f6056cf3233022921cf40cc81862b84293b6a586c196764b0c9619f28785e0
+  suites: [gsm8k, math500, humaneval, mbpp, chat]
+  prompts_per_suite: 64     # rounds at most; the time limit decides (~12 per model expected)
+  max_minutes: 45           # no new round after 45 min (+ ~5 min environment setup)
+  max_new_tokens: 512
+  dtype: float32
+  strategies:               # replayed on every prompt
+    - {name: base}                                           # paper: draft -> verify
+    - {name: tail-s0, kind: tail, shifts: [0]}               # + verify the rest of the block
+    - {name: tail-tree, kind: tail, shifts: [1, 0, -1, -2]}  # + the same with shifted copies
+    - {name: tail-tree-gated, kind: tail, shifts: [1, 0, -1, -2], min_expected: 4}
+    - {name: reuse-tree, kind: reuse, shifts: [1, 0, -1, -2]}  # tail tried in the next verify
+  check_rounds: 1           # round 0: these also decode for real (replay check on the GPU)
+  check_strategies: [tail-tree, reuse-tree]
+  ar_prompts: 1             # and one prompt per model with plain AR (losslessness)

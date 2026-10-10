@@ -1,0 +1,34 @@
+# Final evaluation of our Qwen3-0.6B (run qwen3-0.6b-paper) in one job, ~65 min on g2.1:
+#  1. the decoding-cycle experiment on it (configs/decode/tail-v1-0.6b.yaml, ~12 min), comparable
+#     with the official 1.7B/4B/8B in experiments/decode-tail-v1;
+#  2. orthrus.evaluate: TPF, acceptance, AR parity and speedup on 32 prompts per suite (held-out +
+#     GSM8K, MATH-500, HumanEval, MBPP), 512 new tokens, fp32 (~45 min; same as jobs/eval.yaml).
+# python scripts/ds.py run jobs/final-eval.yaml --max-minutes 105 --retry-minutes 120
+name: orthrus-final-eval
+desc: Final evaluation of Orthrus Qwen3-0.6B and its decoding-cycle experiment
+cmd: >-
+  bash -c "rm -rf /job/.cache/pip;
+  timeout --kill-after=2m 25m python3 -m orthrus.decode_exp --config configs/decode/tail-v1-0.6b.yaml;
+  timeout --kill-after=5m 70m python3 -m orthrus.evaluate --config configs/qwen3-0.6b.yaml
+  eval.max_new_tokens=512 eval.dtype=float32"
+inputs:
+  - configs/decode/tail-v1-0.6b.yaml
+  - configs/qwen3-0.6b.yaml
+  - requirements/train.txt
+env:
+  vars:
+    - HF_HUB_DISABLE_PROGRESS_BARS: 1
+    - TOKENIZERS_PARALLELISM: "false"
+    - PYTHONUNBUFFERED: 1
+    - HF_XET_CHUNK_CACHE_SIZE_BYTES: 0
+    - ORTHRUS_BUCKET
+    - ORTHRUS_TRACKIO_SPACE
+    - ORTHRUS_GIT_COMMIT
+  python:
+    type: manual
+    version: 3.12
+    requirements-file: requirements/train.txt
+    local-paths:
+      - orthrus
+cloud-instance-types:
+  - g2.1

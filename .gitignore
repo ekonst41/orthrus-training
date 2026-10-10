@@ -23,3 +23,6 @@ __pycache__/
 
 # DataSphere CLI logs and downloaded job files
 .ds_logs/
+
+# Dependencies are locked in requirements/*.txt (scripts/lock.py); uv commands may leave this
+uv.lock

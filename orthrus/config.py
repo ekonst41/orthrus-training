@@ -90,6 +90,28 @@ class DatagenConfig:
 
 
 @dataclass
+class DecodeConfig:
+    """Decoding-cycle experiments (orthrus.decode_exp, orthrus.decode_report)."""
+
+    models: list = field(default_factory=list)  # [{tag, base, revision}, ...] overriding model
+    # per checkpoint, all decoded in one job ([]: the run's model); base "bucket:runs/<run>/final"
+    # takes an export of our own run from the bucket
+    prompt_set: str = "decode-v1"  # bucket experiments/prompts/<name>.jsonl (--build-prompts)
+    prompt_set_sha256: str = ""  # pin: a run refuses a prompt set with another hash
+    suites: tuple[str, ...] = ("gsm8k", "math500", "humaneval", "mbpp", "chat")
+    prompts_per_suite: int = 64  # rounds at most: round r decodes prompt r of every suite
+    max_minutes: float = 0  # no new round after this many minutes of the job (0: no limit)
+    max_new_tokens: int = 512
+    dtype: str = "float32"  # fp32: every strategy reproduces the AR output exactly (bf16 ties)
+    strategies: list = field(default_factory=lambda: [{"name": "base"}])  # decoding.Strategy
+    # fields, replayed on every prompt; the first must be kind base (it decodes the reference)
+    check_rounds: int = 1  # rounds in which check_strategies also decode for real
+    check_strategies: list = field(default_factory=list)  # names (real decodes besides base)
+    ar_prompts: int = 1  # prompts per check round also decoded with plain AR (losslessness)
+    chunk_blocks: int = 32  # blocks per pass of the draft table
+
+
+@dataclass
 class StorageConfig:
     bucket: str | None = None  # HF Storage Bucket "user/name"; None: $ORTHRUS_BUCKET; "" disables
     local_dir: str = "runs"  # working directory for data, checkpoints and logs
@@ -111,6 +133,7 @@ class Config:
     train: TrainConfig = field(default_factory=TrainConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     datagen: DatagenConfig = field(default_factory=DatagenConfig)
+    decode: DecodeConfig = field(default_factory=DecodeConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
 
