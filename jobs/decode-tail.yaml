@@ -2,12 +2,17 @@
 # in one job of at most ~1 GPU hour. Rounds of 5 prompts (one per suite) go to the model with the
 # fewest rounds and are uploaded to experiments/decode-tail-v1/ as they finish; a rerun continues.
 # Analysis at any time: python -m orthrus.decode_report --config configs/decode/tail-v1.yaml
-# python scripts/ds.py run jobs/decode-tail.yaml --max-minutes 62 --retry-minutes 120
+# python scripts/ds.py run jobs/decode-tail.yaml --max-minutes 50 --retry-minutes 120
 name: orthrus-decode-tail
 desc: Orthrus decoding cycles with tail verification, official 1.7B/4B/8B, fp32, ~1 GPU hour
+# The pip cache is removed first and hf-xet keeps no chunk cache: the job disk (~34 GB) must hold
+# the environment and the largest checkpoint (8B: 19.4 GB). decode.max_minutes=36: this job
+# continues bt1kjlrq1i67p23arbq7 (15 GPU min, stopped by a full disk while downloading the 8B),
+# so the experiment stays within ~1 GPU hour in total.
 cmd: >-
-  timeout --kill-after=2m 52m python3 -m orthrus.decode_exp
-  --config configs/decode/tail-v1.yaml
+  bash -c "rm -rf /job/.cache/pip; df -h /job /dev/shm;
+  timeout --kill-after=2m 45m python3 -m orthrus.decode_exp
+  --config configs/decode/tail-v1.yaml decode.max_minutes=36"
 inputs:
   - configs/decode/tail-v1.yaml
   - requirements/train.txt
@@ -17,6 +22,7 @@ env:
     - TOKENIZERS_PARALLELISM: "false"
     - PYTHONUNBUFFERED: 1
     - PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True  # three fp32 models (~68 GB) share the GPU
+    - HF_XET_CHUNK_CACHE_SIZE_BYTES: 0  # no download cache on the small job disk
     - ORTHRUS_BUCKET
     - ORTHRUS_TRACKIO_SPACE
     - ORTHRUS_GIT_COMMIT

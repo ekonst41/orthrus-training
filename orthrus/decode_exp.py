@@ -341,36 +341,65 @@ def model_specs(cfg: Config) -> list[tuple[str, ModelConfig]]:
 
 class Prefetcher:
     """Downloads Hub checkpoints one at a time in a background thread, so the first model already
-    decodes while the next one arrives. The next download starts only after the previous model
-    is in memory and its files are deleted: a DataSphere job has ~34 GB of disk, less than the
-    environment plus all three official checkpoints (4.1 + 9.9 + 19.4 GB)."""
+    decodes while the next one arrives. A DataSphere job has ~34 GB of disk, less than the
+    environment plus all three official checkpoints (4.1 + 9.9 + 19.4 GB), so: the next download
+    starts only after the previous model is in memory and its files are deleted; files go to
+    /dev/shm (RAM) when it has room; a checkpoint that does not fit anywhere is skipped with an
+    error instead of failing the job (the other models go on)."""
 
     def __init__(self, specs: list[tuple[str, ModelConfig]]):
         self.ready = {tag: threading.Event() for tag, _ in specs}
+        self.local: dict[str, Path] = {}  # tag -> downloaded snapshot directory
+        self.failed: dict[str, str] = {}
         self._released = {tag: threading.Event() for tag, _ in specs}
-        self._paths: dict[str, Path] = {}
         threading.Thread(target=self._work, args=(specs,), daemon=True).start()
 
-    def _work(self, specs) -> None:
-        from huggingface_hub import snapshot_download
+    @staticmethod
+    def _where(needed: int) -> str | None:
+        """Cache directory for `needed` bytes: /dev/shm if it fits there, else the default HF
+        cache if the disk has room, else None."""
+        from huggingface_hub import constants
 
+        margin = 2 * 2**30
+        if Path("/dev/shm").is_dir() and shutil.disk_usage("/dev/shm").free > needed + margin:
+            return "/dev/shm/hf-cache"
+        root = Path(constants.HF_HUB_CACHE)
+        root.mkdir(parents=True, exist_ok=True)
+        return str(root) if shutil.disk_usage(root).free > needed + margin else None
+
+    def _work(self, specs) -> None:
+        from huggingface_hub import HfApi, snapshot_download
+
+        skip = ["*.png", "*.md"]
         for tag, spec in specs:
             try:
                 if not Path(spec.base).exists():
-                    snapshot = snapshot_download(
-                        spec.base, revision=spec.revision, ignore_patterns=["*.png", "*.md"]
+                    info = HfApi().model_info(
+                        spec.base, revision=spec.revision, files_metadata=True
                     )
-                    self._paths[tag] = Path(snapshot).parents[1]  # models--<org>--<name>
-            except Exception as error:  # loading retries the download and raises if it fails
-                log.warning("prefetch of %s failed: %s", spec.base, error)
+                    needed = sum(f.size or 0 for f in info.siblings if not f.rfilename.endswith(
+                        (".png", ".md")))  # fmt: skip
+                    cache = self._where(needed)
+                    if cache is None:
+                        raise OSError(f"no room for {needed / 2**30:.1f} GiB")
+                    log.info("downloading %s (%.1f GiB) to %s", spec.base, needed / 2**30, cache)
+                    self.local[tag] = Path(
+                        snapshot_download(
+                            spec.base, revision=spec.revision, cache_dir=cache, ignore_patterns=skip
+                        )
+                    )
+            except Exception as error:
+                log.error("%s (%s) skipped: %s", tag, spec.base, error)
+                self.failed[tag] = str(error)
             self.ready[tag].set()
-            self._released[tag].wait()
+            if tag not in self.failed:
+                self._released[tag].wait()
 
     def release(self, tag: str) -> None:
         """The model is in memory: delete its downloaded files, start the next download."""
         gc.collect()  # drop memory maps of the checkpoint files
-        if tag in self._paths:
-            shutil.rmtree(self._paths[tag], ignore_errors=True)
+        if tag in self.local:
+            shutil.rmtree(self.local[tag].parents[1], ignore_errors=True)  # models--<org>--<name>
         self._released[tag].set()
 
 
@@ -412,11 +441,13 @@ def _live_table(models: list[_Model], strategies, suites) -> str:
     return f"replayed TPF (mean over suites; rounds: {rounds})\n" + "\n".join(lines)
 
 
-def _load(m: _Model, by_suite: dict, warm_up: list, cfg: Config, device, dtype, run_dir, bucket):
+def _load(m: _Model, local: Path | None, warm_up: list, cfg: Config, device, dtype, run_dir, bucket,
+          by_suite: dict):  # fmt: skip
     from orthrus.checkpoint import load_model
     from orthrus.evaluate import eos_token_ids
 
-    model, tokenizer, _ = load_model(m.spec, device, dtype)
+    spec = dataclasses.replace(m.spec, base=str(local)) if local else m.spec  # the downloaded files
+    model, tokenizer, _ = load_model(spec, device, dtype)
     m.model, m.eos = model.eval(), eos_token_ids(model, tokenizer)
     for p in (p for items in by_suite.values() for p in items):
         if chat_ids(tokenizer, p["messages"]) != p["prompt_ids"]:
@@ -489,8 +520,14 @@ def run(cfg: Config) -> None:
     while True:
         for m in models:  # load what has arrived (between rounds: loading blocks the GPU)
             if m.model is None and m.next_round < rounds and prefetch.ready[m.tag].is_set():
-                _load(m, by_suite, [strategies[0], *checks], cfg, device, dtype, run_dir, bucket)
+                if m.tag in prefetch.failed:
+                    m.next_round = rounds  # skipped (logged by the prefetcher)
+                    continue
+                warm = [strategies[0], *checks]
+                local = prefetch.local.get(m.tag)
+                _load(m, local, warm, cfg, device, dtype, run_dir, bucket, by_suite)
                 prefetch.release(m.tag)
+                log.info("disk free: %.1f GiB", shutil.disk_usage(run_dir).free / 2**30)
                 log.info("%s loaded (%.1f min since start)", m.tag, (time.time() - started) / 60)
                 watchdog.beat()
         pending = [m for m in models if m.next_round < rounds]

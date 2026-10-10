@@ -1,5 +1,6 @@
 import hashlib
 import json
+import types
 
 import numpy as np
 import pytest
@@ -82,6 +83,10 @@ def setup(tmp_path, monkeypatch, lively_model):  # noqa: F811
         return str(snapshot)
 
     monkeypatch.setattr("huggingface_hub.snapshot_download", fake_download)
+    monkeypatch.setattr(
+        "huggingface_hub.HfApi.model_info",
+        lambda self, repo_id, **kwargs: types.SimpleNamespace(siblings=[]),
+    )
     return tmp_path, digest, loaded
 
 
@@ -103,7 +108,8 @@ def test_rounds_check_resume_and_report(setup):
     decode_exp.run(_config(tmp_path, digest, "decode.prompts_per_suite=1"))
     assert len(list(root.glob("*/round-*.jsonl"))) == 2
     decode_exp.run(_config(tmp_path, digest))
-    assert loaded.count("fake/small") >= 2 and loaded.count("fake/large") >= 2
+    small = sum("models--fake--small" in path for path in loaded)  # loaded from the download
+    assert small >= 2 and sum("models--fake--large" in path for path in loaded) >= 2
     assert not list((tmp_path / "hub").glob("models--*"))  # released after loading
     for tag in ("small", "large"):
         records = _records(root, tag)
