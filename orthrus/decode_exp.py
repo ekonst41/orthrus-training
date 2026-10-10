@@ -1,25 +1,30 @@
 """Decoding-cycle experiments: does verifying the rejected tail of a draft block raise TPF?
 
-    python -m orthrus.decode_exp --config configs/decode/qwen3-1.7b.yaml [decode.max_new_tokens=64]
-    python -m orthrus.decode_exp --config configs/decode/qwen3-1.7b.yaml --build-prompts
+    python -m orthrus.decode_exp --config configs/decode/tail-v1.yaml [decode.max_minutes=10]
+    python -m orthrus.decode_exp --config configs/decode/tail-v1.yaml --build-prompts
 
-Runs every strategy of decode.strategies (orthrus/decoding.py) on a frozen prompt set with an
-Orthrus model (model.base: an export directory or a Hub id such as chiennv/Orthrus-Qwen3-4B, at a
-pinned model.revision), greedy, batch 1, in decode.dtype. Per prompt:
-  1. the first strategy (kind base: the paper's cycle) decodes the reference output;
-  2. the draft table: the diffusion drafts at every anchor of that output (decoding.draft_table);
-  3. every other strategy decodes for real; its output must equal the reference ("match_base"),
-     the drafts it met must equal the table ("draft_mismatch"), and replaying it from the table
-     (decoding.OracleBackend) must give the same passes ("sim_match");
-  4. the first decode.ar_reference_prompts prompts of each suite are also decoded with plain AR:
-     losslessness ("match_ar") and the AR wall-clock time.
-Strategies run one after another on the same prompt, so slow drifts of the machine hit all alike.
+One job covers every checkpoint of decode.models (official Orthrus Qwen3 models at pinned Hub
+commits; empty: the run's model): weights download in the background while the first model
+already decodes, and all models stay on the GPU. Work goes in rounds: round r decodes prompt r of
+every suite on one model, always on the model with the fewest rounds, so the results stay balanced
+across models and suites whenever the job stops; decode.max_minutes bounds the job (no round
+starts after it). Per prompt, greedy, batch 1, in decode.dtype:
+  1. base (the paper's cycle, the first strategy) decodes the reference output;
+  2. the draft table: the diffusion drafts at every anchor of that output (decoding.draft_table),
+     from which every strategy of decode.strategies is replayed exactly on the CPU
+     (decoding.OracleBackend; orthrus.decode_report);
+  3. in the first decode.check_rounds rounds, decode.check_strategies also decode for real: their
+     output must equal the reference ("match_base"), the drafts they met must equal the table
+     ("draft_mismatch") and the replay must give the same passes ("sim_match"); the first
+     decode.ar_prompts prompts of those rounds also decode with plain AR ("match_ar").
+Base itself is checked the same way on every prompt.
 
-Results go to experiments/<run_name>/ in the bucket (locally <storage.local_dir>/experiments/):
-run.json (config, code, environment, one segment per job), suites/<suite>/traces.npz (reference
-outputs and draft tables) and suites/<suite>/records.jsonl (one line per prompt and strategy,
-uploaded last: it marks a complete suite), summary.json. A rerun continues with the first missing
-suite. Analysis and the offline policy search: python -m orthrus.decode_report.
+Results: experiments/<run_name>/ in the bucket (locally <storage.local_dir>/experiments/):
+run.json (config, code, environment, one segment per job), <model>/model.json (checkpoint, EOS
+ids), <model>/round-NNNN.jsonl (one line per real decode) and round-NNNN.npz (reference outputs and
+draft tables), uploaded after every round. A rerun continues with the first missing round of each
+model. The job log shows the replayed TPF of every strategy after each round; the full analysis:
+python -m orthrus.decode_report.
 
 --build-prompts writes the prompt set decode.prompt_set: up to 128 prompts per suite from pinned
 benchmark revisions and the held-out chat prompts of data/<data.dataset>/eval_prompts.jsonl (never
@@ -29,17 +34,21 @@ decode.prompt_set_sha256.
 """
 
 import argparse
+import dataclasses
+import gc
 import hashlib
 import json
 import logging
 import re
+import shutil
+import threading
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from orthrus.config import Config, parse_args
+from orthrus.config import Config, ModelConfig, parse_args
 from orthrus.decoding import (
     ModelBackend,
     OracleBackend,
@@ -235,20 +244,24 @@ def run_prompt(model, prompt: dict, strategies, eos: set[int], cfg: Config, with
     }
     runs = []
     for strategy in strategies:
-        backend = ModelBackend(model, ids, record_drafts=d.draft_table)
+        backend = ModelBackend(model, ids, record_drafts=True)
         gen, seconds = _timed(
             device, lambda b=backend, s=strategy: decode(b, s, len(ids), new, eos)
         )
         runs.append((strategy, gen, seconds, backend.drafts))
     reference = runs[0][1].tokens
-    trace = {"rank": prompt["rank"], "prompt_len": len(ids), "reference": reference}
-    if d.draft_table:
-        (drafts, confidence), seconds = _timed(
-            device, lambda: draft_table(model, ids, reference, new, d.chunk_blocks)
-        )
-        trace.update(drafts=drafts, confidence=confidence, seconds=seconds)
-        rows = [row[row >= 0].tolist() for row in drafts]
-        confidence_rows = confidence.tolist()
+    trace = {
+        "suite": prompt["suite"],
+        "rank": prompt["rank"],
+        "prompt_len": len(ids),
+        "reference": reference,
+    }
+    (drafts, confidence), seconds = _timed(
+        device, lambda: draft_table(model, ids, reference, new, d.chunk_blocks)
+    )
+    trace.update(drafts=drafts, confidence=confidence, seconds=seconds)
+    rows = [row[row >= 0].tolist() for row in drafts]
+    confidence_rows = confidence.tolist()
     ar = None
     if with_ar:
         backend = ModelBackend(model, ids)
@@ -261,19 +274,17 @@ def run_prompt(model, prompt: dict, strategies, eos: set[int], cfg: Config, with
             record["tokens"] = gen.tokens
         if ar is not None:
             record["match_ar"] = gen.tokens == ar.tokens
-        if d.draft_table:
-            mismatch = sum(
-                drafts[start - len(ids), : len(tokens)].tolist() != tokens
-                for start, tokens in visited.items()
+        mismatch = sum(
+            drafts[start - len(ids), : len(tokens)].tolist() != tokens
+            for start, tokens in visited.items()
+        )
+        record.update(draft_checked=len(visited), draft_mismatch=mismatch, sim_match=None)
+        if record["match_base"]:
+            oracle = OracleBackend(
+                len(ids), reference, rows, confidence_rows, model.config.block_size
             )
-            record.update(draft_checked=len(visited), draft_mismatch=mismatch)
-            record["sim_match"] = None
-            if record["match_base"]:
-                oracle = OracleBackend(
-                    len(ids), reference, rows, confidence_rows, model.config.block_size
-                )
-                replay = decode(oracle, strategy, len(ids), new, eos)
-                record["sim_match"] = same_trace(gen, replay)
+            replay = decode(oracle, strategy, len(ids), new, eos)
+            record["sim_match"] = same_trace(gen, replay)
         records.append(record)
     if ar is not None:
         record = {
@@ -292,6 +303,7 @@ def write_traces(path: Path, traces: list[dict], block_size: int, max_new_tokens
     path.parent.mkdir(parents=True, exist_ok=True)
     lengths = [len(t["reference"]) for t in traces]
     arrays = {
+        "suite": np.array([t["suite"] for t in traces]),
         "rank": np.array([t["rank"] for t in traces], dtype=np.int32),
         "prompt_len": np.array([t["prompt_len"] for t in traces], dtype=np.int32),
         "offsets": np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64),
@@ -299,10 +311,9 @@ def write_traces(path: Path, traces: list[dict], block_size: int, max_new_tokens
         "block_size": np.array(block_size),
         "max_new_tokens": np.array(max_new_tokens),
     }
-    if traces and "drafts" in traces[0]:
-        arrays["drafts"] = np.concatenate([t["drafts"] for t in traces])
-        arrays["confidence"] = np.concatenate([t["confidence"] for t in traces])
-        arrays["table_seconds"] = np.array([t["seconds"] for t in traces])
+    arrays["drafts"] = np.concatenate([t["drafts"] for t in traces])
+    arrays["confidence"] = np.concatenate([t["confidence"] for t in traces])
+    arrays["table_seconds"] = np.array([t["seconds"] for t in traces])
     np.savez_compressed(path, **arrays)
 
 
@@ -312,40 +323,152 @@ def _warm_up(model, prompt: dict, strategies, eos: set[int], cfg: Config) -> Non
     for strategy in strategies:
         decode(ModelBackend(model, ids), strategy, len(ids), 48, eos)
     out = ar_decode(ModelBackend(model, ids), len(ids), 8, eos)
-    if cfg.decode.draft_table:
-        draft_table(model, ids, out.tokens, cfg.decode.max_new_tokens, cfg.decode.chunk_blocks)
+    draft_table(model, ids, out.tokens, cfg.decode.max_new_tokens, cfg.decode.chunk_blocks)
+
+
+def model_specs(cfg: Config) -> list[tuple[str, ModelConfig]]:
+    """(tag, model settings) per checkpoint of the run: decode.models entries override model."""
+    if not cfg.decode.models:
+        return [(Path(cfg.model.base).name.lower(), cfg.model)]
+    specs = []
+    for entry in cfg.decode.models:
+        fields = dict(entry)
+        specs.append((fields.pop("tag"), dataclasses.replace(cfg.model, **fields)))
+    if len({tag for tag, _ in specs}) != len(specs):
+        raise ValueError("decode.models tags must be unique")
+    return specs
+
+
+class Prefetcher:
+    """Downloads Hub checkpoints one at a time in a background thread, so the first model already
+    decodes while the next one arrives. The next download starts only after the previous model
+    is in memory and its files are deleted: a DataSphere job has ~34 GB of disk, less than the
+    environment plus all three official checkpoints (4.1 + 9.9 + 19.4 GB)."""
+
+    def __init__(self, specs: list[tuple[str, ModelConfig]]):
+        self.ready = {tag: threading.Event() for tag, _ in specs}
+        self._released = {tag: threading.Event() for tag, _ in specs}
+        self._paths: dict[str, Path] = {}
+        threading.Thread(target=self._work, args=(specs,), daemon=True).start()
+
+    def _work(self, specs) -> None:
+        from huggingface_hub import snapshot_download
+
+        for tag, spec in specs:
+            try:
+                if not Path(spec.base).exists():
+                    snapshot = snapshot_download(
+                        spec.base, revision=spec.revision, ignore_patterns=["*.png", "*.md"]
+                    )
+                    self._paths[tag] = Path(snapshot).parents[1]  # models--<org>--<name>
+            except Exception as error:  # loading retries the download and raises if it fails
+                log.warning("prefetch of %s failed: %s", spec.base, error)
+            self.ready[tag].set()
+            self._released[tag].wait()
+
+    def release(self, tag: str) -> None:
+        """The model is in memory: delete its downloaded files, start the next download."""
+        gc.collect()  # drop memory maps of the checkpoint files
+        if tag in self._paths:
+            shutil.rmtree(self._paths[tag], ignore_errors=True)
+        self._released[tag].set()
+
+
+@dataclasses.dataclass
+class _Model:
+    tag: str
+    spec: ModelConfig
+    model: object = None
+    eos: set | None = None
+    next_round: int = 0
+    replayed: dict = dataclasses.field(default_factory=dict)  # (strategy, suite): [tokens, passes]
+
+
+def _replay_round(m: _Model, traces: list[dict], strategies, max_new_tokens: int) -> None:
+    for trace in traces:
+        rows = [row[row >= 0].tolist() for row in trace["drafts"]]
+        confidence = trace["confidence"].tolist()
+        for strategy in strategies:
+            oracle = OracleBackend(
+                trace["prompt_len"], trace["reference"], rows, confidence, m.model.config.block_size
+            )
+            gen = decode(oracle, strategy, trace["prompt_len"], max_new_tokens, m.eos)
+            totals = m.replayed.setdefault((strategy.name, trace["suite"]), [0, 0])
+            totals[0] += len(gen.tokens)
+            totals[1] += gen.forward_passes
+
+
+def _live_table(models: list[_Model], strategies, suites) -> str:
+    """Replayed TPF so far: per model, the mean over suites of tokens / passes."""
+    lines = [f"{'strategy':<18}" + "".join(f"{m.tag:>14}" for m in models)]
+    for strategy in strategies:
+        cells = []
+        for m in models:
+            totals = [m.replayed.get((strategy.name, s)) for s in suites]
+            tpfs = [t[0] / t[1] for t in totals if t]
+            cells.append(f"{sum(tpfs) / len(tpfs):>14.3f}" if tpfs else f"{'-':>14}")
+        lines.append(f"{strategy.name:<18}" + "".join(cells))
+    rounds = ", ".join(f"{m.tag} {m.next_round}" for m in models)
+    return f"replayed TPF (mean over suites; rounds: {rounds})\n" + "\n".join(lines)
+
+
+def _load(m: _Model, by_suite: dict, warm_up: list, cfg: Config, device, dtype, run_dir, bucket):
+    from orthrus.checkpoint import load_model
+    from orthrus.evaluate import eos_token_ids
+
+    model, tokenizer, _ = load_model(m.spec, device, dtype)
+    m.model, m.eos = model.eval(), eos_token_ids(model, tokenizer)
+    for p in (p for items in by_suite.values() for p in items):
+        if chat_ids(tokenizer, p["messages"]) != p["prompt_ids"]:
+            raise ValueError(f"{m.tag}: the tokenization of {p['suite']}/{p['rank']} differs")
+    info = {
+        "tag": m.tag,
+        **dataclasses.asdict(m.spec),
+        "commit": getattr(model.config, "_commit_hash", None),
+        "eos_token_ids": sorted(m.eos),
+        "block_size": model.config.block_size,
+        "mask_token_id": model.config.mask_token_id,
+        "dtype": str(dtype),
+    }
+    path = run_dir / m.tag / "model.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(info, indent=2), encoding="utf-8")
+    bucket.upload(path, f"experiments/{cfg.run_name}/{m.tag}/model.json")
+    _warm_up(model, by_suite[cfg.decode.suites[0]][0], warm_up, m.eos, cfg)
 
 
 def run(cfg: Config) -> None:
-    from orthrus.checkpoint import load_model
-    from orthrus.decode_report import summarize, summary_table
-    from orthrus.evaluate import eos_token_ids
     from orthrus.tracking import Tracker, Watchdog, end_segment, write_manifest
 
+    started = time.time()
     d = cfg.decode
     strategies = parse_strategies(d.strategies)
     if strategies[0].kind != "base":
         raise ValueError("the first strategy must be kind base: it decodes the reference")
-    if any(s.oracle_min_tokens for s in strategies):
-        raise ValueError("oracle_min_tokens strategies are replay-only (orthrus.decode_report)")
+    by_name = {s.name: s for s in strategies}
+    checks = [by_name[name] for name in d.check_strategies]
+    if any(s.oracle_min_tokens or s.kind == "base" for s in checks):
+        raise ValueError("check_strategies: real decodes besides base (no replay-only gates)")
+    specs = model_specs(cfg)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = getattr(torch, d.dtype) if device.type == "cuda" else torch.float32
     torch.backends.cuda.matmul.allow_tf32 = False  # exact fp32 (the defaults, made explicit)
     torch.backends.cudnn.allow_tf32 = False
     bucket = Bucket(cfg.storage.bucket)
-    prompts, digest = load_prompt_set(cfg, bucket)
-    model, tokenizer, _ = load_model(cfg.model, device, dtype)
-    model.eval()
-    eos = eos_token_ids(model, tokenizer)
-    for prompt in prompts:  # the model's own chat template must give the stored ids
-        if (
-            prompt["suite"] in d.suites
-            and chat_ids(tokenizer, prompt["messages"]) != (prompt["prompt_ids"])
-        ):
-            raise ValueError(f"{prompt['suite']}/{prompt['rank']}: tokenization differs")
-
     run_dir = Path(cfg.storage.local_dir) / "experiments" / cfg.run_name
     remote = f"experiments/{cfg.run_name}"
+    models = [_Model(tag, spec) for tag, spec in specs]
+    for m in models:  # continue after the last complete round of an earlier job
+        done = {Path(p).name for p in bucket.list(f"{remote}/{m.tag}")}
+        done |= {p.name for p in (run_dir / m.tag).glob("round-*.jsonl")}
+        while f"round-{m.next_round:04d}.jsonl" in done:
+            m.next_round += 1
+    prompts, digest = load_prompt_set(cfg, bucket)
+    by_suite = {s: [p for p in prompts if p["suite"] == s][: d.prompts_per_suite] for s in d.suites}
+    rounds = min(len(v) for v in by_suite.values())
+    if rounds == 0:
+        raise ValueError(f"the prompt set lacks some of the suites {d.suites}")
+    prefetch = Prefetcher([(m.tag, m.spec) for m in models if m.next_round < rounds])
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest = run_dir / "run.json"
     if not manifest.exists():
@@ -355,78 +478,82 @@ def run(cfg: Config) -> None:
         cfg,
         prompt_set_sha256=digest,
         strategies=[s.to_dict() for s in strategies],
-        eos_token_ids=sorted(eos),
-        model_commit=getattr(model.config, "_commit_hash", None),
+        models={tag: dataclasses.asdict(spec) for tag, spec in specs},
     )
     bucket.upload(manifest, f"{remote}/run.json")
     tracker = Tracker(cfg, run_dir, "decode")
     watchdog = Watchdog(cfg.train.stall_minutes, "decoding progress")
-    started, finished = time.time(), []
 
-    selected = {s: [p for p in prompts if p["suite"] == s][: d.prompts_per_suite] for s in d.suites}
-    total = sum(len(v) for v in selected.values())
-    _warm_up(model, next(iter(selected.values()))[0], strategies, eos, cfg)
-    done_prompts = 0
-    for suite, items in selected.items():
-        if not items:
-            raise ValueError(f"the prompt set has no prompts for suite {suite}")
-        records_path = run_dir / "suites" / suite / "records.jsonl"
-        if records_path.exists() or bucket.exists(f"{remote}/suites/{suite}/records.jsonl"):
-            log.info("%s: complete in an earlier job, skipped", suite)
-            done_prompts += len(items)
+    completed = []
+    deadline = started + d.max_minutes * 60 if d.max_minutes else None
+    while True:
+        for m in models:  # load what has arrived (between rounds: loading blocks the GPU)
+            if m.model is None and m.next_round < rounds and prefetch.ready[m.tag].is_set():
+                _load(m, by_suite, [strategies[0], *checks], cfg, device, dtype, run_dir, bucket)
+                prefetch.release(m.tag)
+                log.info("%s loaded (%.1f min since start)", m.tag, (time.time() - started) / 60)
+                watchdog.beat()
+        pending = [m for m in models if m.next_round < rounds]
+        if not pending:
+            break
+        if deadline is not None and time.time() > deadline:
+            log.info("decode.max_minutes reached: no new round")
+            break
+        loaded = [m for m in pending if m.model is not None]
+        if not loaded:
+            next(prefetch.ready[m.tag] for m in pending if m.model is None).wait(timeout=10)
+            watchdog.beat()
             continue
+        m = min(loaded, key=lambda x: (x.next_round, models.index(x)))
+        r, check = m.next_round, m.next_round < d.check_rounds
         records, traces = [], []
-        for i, prompt in enumerate(items):
+        for i, suite in enumerate(d.suites):
             new_records, trace = run_prompt(
-                model, prompt, strategies, eos, cfg, i < d.ar_reference_prompts
+                m.model,
+                by_suite[suite][r],
+                [strategies[0], *checks] if check else [strategies[0]],
+                m.eos,
+                cfg,
+                with_ar=check and i < d.ar_prompts,
             )
+            for record in new_records:
+                record.update(model=m.tag, round=r)
             records += new_records
             traces.append(trace)
-            done_prompts += 1
-            line = " | ".join(
-                f"{r['strategy']} {r['new_tokens'] / r['passes']:.2f}"
-                for r in new_records
-                if r["strategy"] != "ar"
-            )
-            log.info(
-                "%s %d/%d: %d+%d tokens, TPF %s%s",
-                suite,
-                i + 1,
-                len(items),
-                len(prompt["prompt_ids"]),
-                len(trace["reference"]),
-                line,
-                ""
-                if all(r.get("sim_match") is not False and r["match_base"] for r in new_records)
-                else "  [CHECK FAILED]",
-            )
-            tracker.progress(done_prompts / total, f"{suite} {i + 1}/{len(items)}")
             watchdog.beat()
-        write_traces(
-            run_dir / "suites" / suite / "traces.npz",
-            traces,
-            model.config.block_size,
-            d.max_new_tokens,
+        failed = [
+            f"{x['suite']}/{x['strategy']}"
+            for x in records
+            if not x["match_base"]
+            or x.get("sim_match") is False
+            or x.get("match_ar") is False
+            or x.get("draft_mismatch")
+        ]
+        stem = run_dir / m.tag / f"round-{r:04d}"
+        write_traces(stem.with_suffix(".npz"), traces, m.model.config.block_size, d.max_new_tokens)
+        stem.with_suffix(".jsonl").write_text(
+            "".join(json.dumps(x) + "\n" for x in records), encoding="utf-8"
         )
-        records_path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
-        bucket.upload(
-            run_dir / "suites" / suite / "traces.npz", f"{remote}/suites/{suite}/traces.npz"
+        for suffix in (".npz", ".jsonl"):  # uploaded in order: the .jsonl marks a full round
+            path = stem.with_suffix(suffix)
+            target = f"{remote}/{m.tag}/{path.name}"  # bound now: the upload runs later
+            bucket.submit(lambda path=path, target=target: bucket.upload(path, target))
+        _replay_round(m, traces, strategies, d.max_new_tokens)
+        m.next_round += 1
+        completed.append(f"{m.tag}/{r}")
+        log.info(
+            "%s round %d done (%.1f min)%s\n%s",
+            m.tag,
+            r,
+            (time.time() - started) / 60,
+            f"  CHECK FAILED: {failed}" if failed else "",
+            _live_table(models, strategies, d.suites),
         )
-        bucket.upload(records_path, f"{remote}/suites/{suite}/records.jsonl")  # marks completion
-        finished.append(suite)
-        log.info("%s complete:\n%s", suite, summary_table(summarize(records)))
-
-    all_records = []
-    for suite in d.suites:
-        path = run_dir / "suites" / suite / "records.jsonl"
-        if not path.exists():
-            bucket.download_file(f"{remote}/suites/{suite}/records.jsonl", path)
-        all_records += [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x]
-    summary = summarize(all_records)
-    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    bucket.upload(run_dir / "summary.json", f"{remote}/summary.json")
-    log.info("all suites:\n%s", summary_table(summary))
-    end_segment(manifest, suites_completed=finished, hours_decoding=(time.time() - started) / 3600)
+        tracker.progress(
+            sum(x.next_round for x in models) / (rounds * len(models)), f"{m.tag} round {r}"
+        )
+    bucket.wait()
+    end_segment(manifest, rounds_completed=completed, minutes=(time.time() - started) / 60)
     bucket.upload(manifest, f"{remote}/run.json")
     tracker.close()
 

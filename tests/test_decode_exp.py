@@ -1,6 +1,7 @@
 import hashlib
 import json
 
+import numpy as np
 import pytest
 from test_decoding import model as lively_model  # noqa: F401  (fixture)
 from test_evaluate import tiny_tokenizer
@@ -15,6 +16,7 @@ STRATEGIES = [
     {"name": "tail-gated", "kind": "tail", "shifts": [1, 0], "min_expected": 1.5},
     {"name": "reuse-tree", "kind": "reuse", "shifts": [1, 0, -1, -2]},
 ]
+MODELS = [{"tag": "small", "base": "fake/small"}, {"tag": "large", "base": "fake/large"}]
 
 
 def _prompt_set(path, tokenizer) -> str:
@@ -40,91 +42,113 @@ def _prompt_set(path, tokenizer) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _config(tmp_path, digest: str, **extra):
+def _config(tmp_path, digest: str, *extra: str):
     overrides = [
         "run_name=exp",
         "storage.bucket=",
         f"storage.local_dir={tmp_path}",
         "model.block_size=8",
+        f"decode.models={json.dumps(MODELS)}",
         "decode.prompt_set=unit",
         f"decode.prompt_set_sha256={digest}",
         "decode.suites=[math, code]",
         "decode.prompts_per_suite=3",
         "decode.max_new_tokens=24",
-        "decode.ar_reference_prompts=2",
         "decode.chunk_blocks=4",
         f"decode.strategies={json.dumps(STRATEGIES)}",
-        *[f"{k}={v}" for k, v in extra.items()],
+        "decode.check_strategies=[tail-tree, reuse-tree, tail-gated]",
+        *extra,
     ]
     return load_config(overrides=overrides)
 
 
-def test_experiment_runs_checks_resumes_and_reports(tmp_path, monkeypatch, lively_model):  # noqa: F811
+@pytest.fixture
+def setup(tmp_path, monkeypatch, lively_model):  # noqa: F811
     tokenizer = tiny_tokenizer()
     digest = _prompt_set(tmp_path / "experiments" / "prompts" / "unit.jsonl", tokenizer)
-    calls = []
+    loaded = []
 
-    def fake_load(cfg, device, dtype):
-        calls.append(cfg.base)
+    def fake_load(spec, device, dtype):
+        loaded.append(spec.base)
         return lively_model, tokenizer, []
 
     monkeypatch.setattr(checkpoint, "load_model", fake_load)
-    cfg = _config(tmp_path, digest)
-    decode_exp.run(cfg)
-    root = tmp_path / "experiments" / "exp"
-    records = [
+    hub = tmp_path / "hub"
+
+    def fake_download(repo_id, revision=None, **kwargs):  # files to be released after loading
+        snapshot = hub / f"models--{repo_id.replace('/', '--')}" / "snapshots" / "rev"
+        snapshot.mkdir(parents=True, exist_ok=True)
+        (snapshot / "model.safetensors").write_text("weights")
+        return str(snapshot)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_download)
+    return tmp_path, digest, loaded
+
+
+def _records(root, tag):
+    return [
         json.loads(line)
-        for suite in ("math", "code")
-        for line in (root / "suites" / suite / "records.jsonl").read_text().splitlines()
+        for path in sorted((root / tag).glob("round-*.jsonl"))
+        for line in path.read_text().splitlines()
     ]
-    real = [r for r in records if r["strategy"] != "ar"]
-    assert len(real) == 2 * 3 * len(STRATEGIES)
-    assert sum(r["strategy"] == "ar" for r in records) == 2 * 2
-    assert all(r["match_base"] and r["sim_match"] and r["draft_mismatch"] == 0 for r in real)
-    assert all(r["match_ar"] for r in records if "match_ar" in r)
-    manifest = json.loads((root / "run.json").read_text())
-    assert manifest["prompt_set_sha256"] == digest and len(manifest["segments"]) == 1
 
-    # a rerun skips complete suites but still records a job segment and the summary
-    decode_exp.run(cfg)
-    manifest = json.loads((root / "run.json").read_text())
-    assert len(manifest["segments"]) == 2 and manifest["segments"][-1]["suites_completed"] == []
 
-    text, analysis = decode_report.analyze(cfg, "exp", "small", workers=1)
-    assert "## Policy search" in text and "## Anatomy" in text
-    grid = {e["policy"]: e for e in analysis["grid"]}
-    assert grid["base"]["dev/avg"] == pytest.approx(
-        decode_report.statistics.mean(
-            sum(
-                r["new_tokens"]
-                for r in real
-                if r["strategy"] == "base" and r["suite"] == s and r["split"] == "dev"
-            )
-            / sum(
-                r["passes"]
-                for r in real
-                if r["strategy"] == "base" and r["suite"] == s and r["split"] == "dev"
-            )
-            for s in ("math", "code")
-        )  # fmt: skip
-    )
+def test_rounds_check_resume_and_report(setup):
+    tmp_path, digest, loaded = setup
+    root = tmp_path / "experiments" / "exp"
+    # a job past its time limit (no round starts), a job with one round per model, and a job
+    # that continues with the remaining rounds
+    decode_exp.run(_config(tmp_path, digest, "decode.max_minutes=0.0001"))
+    assert not list(root.glob("*/round-*.jsonl"))
+    decode_exp.run(_config(tmp_path, digest, "decode.prompts_per_suite=1"))
+    assert len(list(root.glob("*/round-*.jsonl"))) == 2
+    decode_exp.run(_config(tmp_path, digest))
+    assert loaded.count("fake/small") >= 2 and loaded.count("fake/large") >= 2
+    assert not list((tmp_path / "hub").glob("models--*"))  # released after loading
+    for tag in ("small", "large"):
+        records = _records(root, tag)
+        assert sorted({r["round"] for r in records}) == [0, 1, 2]
+        check = {r["strategy"] for r in records if r["round"] == 0}
+        assert check == {"base", "tail-tree", "reuse-tree", "tail-gated", "ar"}
+        assert {r["strategy"] for r in records if r["round"] > 0} == {"base"}
+        assert sum(r["strategy"] == "ar" for r in records) == 1
+        real = [r for r in records if r["strategy"] != "ar"]
+        assert all(r["match_base"] and r["sim_match"] and r["draft_mismatch"] == 0 for r in real)
+        assert all(r["match_ar"] for r in records if "match_ar" in r)
+        data = np.load(root / tag / "round-0001.npz")
+        assert list(data["suite"]) == ["math", "code"] and list(data["rank"]) == [1, 1]
+    manifest = json.loads((root / "run.json").read_text())
+    assert manifest["prompt_set_sha256"] == digest and len(manifest["segments"]) == 3
+    assert [len(s["rounds_completed"]) for s in manifest["segments"]] == [0, 2, 4]
+
+    text, results = decode_report.analyze(_config(tmp_path, digest), "exp", "small", workers=1)
+    assert "## Headline" in text and "## Checks" in text and "Anatomy" in text
+    for tag in ("small", "large"):
+        r = results[tag]
+        assert r["prompts"] == 6
+        base = [x for x in _records(root, tag) if x["strategy"] == "base"]
+        for suite in ("math", "code"):
+            rows = [x for x in base if x["suite"] == suite]
+            expected = sum(x["new_tokens"] for x in rows) / sum(x["passes"] for x in rows)
+            assert r["per_suite"][suite]["base"]["tpf"] == pytest.approx(expected)
+        assert r["checks"]["tail-tree"]["sim_match"] == 1.0
+        assert r["ceiling"]["tpf"] >= r["avg"]["base"]["tpf"]
     assert (root / "analysis" / "policy_grid.csv").exists()
 
 
-def test_run_refuses_an_unpinned_change(tmp_path, monkeypatch, lively_model):  # noqa: F811
-    tokenizer = tiny_tokenizer()
-    _prompt_set(tmp_path / "experiments" / "prompts" / "unit.jsonl", tokenizer)
-    monkeypatch.setattr(checkpoint, "load_model", lambda *a: (lively_model, tokenizer, []))
+def test_run_refuses_an_unpinned_change(setup):
+    tmp_path, _, _ = setup
     with pytest.raises(ValueError, match="sha256"):
         decode_exp.run(_config(tmp_path, "0" * 64))
 
 
 def test_bootstrap_paired_difference_is_exact_for_identical_rows():
-    import numpy as np
-
     tokens = np.array([[10, 20, 30], [10, 20, 30]], float)
     passes = np.array([[5, 5, 10], [4, 5, 10]], float)
     base, other = decode_report.bootstrap_tpf(tokens, passes)
     assert base["delta"] == 0 and base["delta_ci"] == [0, 0]
     assert other["tpf"] == pytest.approx(60 / 19) and other["fewer_passes"] == pytest.approx(1 / 3)
     assert other["delta_ci"][0] >= 0
+    avg = decode_report.bootstrap_avg([(tokens, passes), (tokens, passes)])
+    assert avg[0]["change_pct"] == 0
+    assert avg[1]["change_pct"] == pytest.approx(100 * (60 / 19 / 3 - 1))

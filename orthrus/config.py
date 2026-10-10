@@ -93,17 +93,21 @@ class DatagenConfig:
 class DecodeConfig:
     """Decoding-cycle experiments (orthrus.decode_exp, orthrus.decode_report)."""
 
+    models: list = field(default_factory=list)  # [{tag, base, revision}, ...] overriding model
+    # per checkpoint, all decoded in one job ([]: the run's model)
     prompt_set: str = "decode-v1"  # bucket experiments/prompts/<name>.jsonl (--build-prompts)
     prompt_set_sha256: str = ""  # pin: a run refuses a prompt set with another hash
     suites: tuple[str, ...] = ("gsm8k", "math500", "humaneval", "mbpp", "chat")
-    prompts_per_suite: int = 64  # first N of each suite in the prompt set (dev/test alternate)
-    max_new_tokens: int = 1024
+    prompts_per_suite: int = 64  # rounds at most: round r decodes prompt r of every suite
+    max_minutes: float = 0  # no new round after this many minutes of the job (0: no limit)
+    max_new_tokens: int = 512
     dtype: str = "float32"  # fp32: every strategy reproduces the AR output exactly (bf16 ties)
     strategies: list = field(default_factory=lambda: [{"name": "base"}])  # decoding.Strategy
-    # fields; the first must be kind base: its output is the reference of the others
-    ar_reference_prompts: int = 16  # per suite: also plain AR decoding (losslessness, AR time)
-    draft_table: bool = True  # drafts at every anchor: replay check and policy search offline
-    chunk_blocks: int = 64  # blocks per pass of the draft table
+    # fields, replayed on every prompt; the first must be kind base (it decodes the reference)
+    check_rounds: int = 1  # rounds in which check_strategies also decode for real
+    check_strategies: list = field(default_factory=list)  # names (real decodes besides base)
+    ar_prompts: int = 1  # prompts per check round also decoded with plain AR (losslessness)
+    chunk_blocks: int = 32  # blocks per pass of the draft table
 
 
 @dataclass
