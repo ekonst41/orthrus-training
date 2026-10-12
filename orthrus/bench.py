@@ -65,13 +65,14 @@ def reference_loss(model, ids, mask, anchors, valid, chunk):
     teacher = teacher.gather(1, targets.flatten(1)[..., None].expand(-1, -1, teacher.shape[-1]))
     keep = supervision_mask(mask, anchors, valid, k)
     rows = int(keep.sum())
-    total, _ = FusedLinearForwardKL.apply(
+    total, *_ = FusedLinearForwardKL.apply(
         student[keep],
         teacher.view_as(student)[keep].to(student.dtype),
         torch.arange(rows, device=ids.device),
         model.lm_head.weight,
         chunk,
         False,
+        None,
     )
     return total / max(rows, 1)
 

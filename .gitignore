@@ -26,3 +26,6 @@ __pycache__/
 
 # Dependencies are locked in requirements/*.txt (scripts/lock.py); uv commands may leave this
 uv.lock
+
+# Logs of background ablation runs (scripts/ablation)
+/logs/

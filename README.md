@@ -60,7 +60,7 @@ python scripts/ds.py run jobs/eval.yaml --max-minutes 120          # 32 пром
 
 | Префикс | Что |
 |---|---|
-| `train/` | `loss` (KL), `top1_agreement`, `agree_k{1,2,4,8,16,31}` по позициям блока, `acceptance_proxy`, `grad_norm`, `lr`, `epoch`, `valid_anchors`, `skipped_steps` |
+| `train/` | `loss` (KL без весов), `weighted_loss` (оптимизируемая взвешенная KL, только при `train.loss_gamma > 0`), `top1_agreement`, `agree_k{1,2,4,8,16,31}` и `kl_k{...}` по позициям блока, `acceptance_proxy`, `grad_norm`, `lr`, `epoch`, `valid_anchors`, `skipped_steps` |
 | `perf/` | `seconds_per_step` (без времени оценок и сохранений), `input_tokens_per_second`, `eta_hours`, `max_memory_gb`, `memory_reserved_gb`, `gpu_util`, `gpu_power_w` |
 | `eval/` | KL и согласие на 256 отложенных строках (каждые `train.eval_every` шагов) |
 | `generate/` | настоящая диффузионная генерация отложенных промптов (поровну math/code/chat): `tpf`, `acceptance_length`, `tokens_per_cycle`, `tokens_per_second` и они же по доменам (`generate/math/tpf`) |
@@ -116,6 +116,7 @@ Speculative decoding в vLLM не ускоряет: `ngram_gpu` 0.99× (прин
 | AdamW, нижний предел LR | betas (0.9, 0.95), wd 0; 10% от пика | офиц. код |
 | Токен маски | `len(tokenizer)` (151669), строка эмбеддинга не меняется | офиц. чекпоинт |
 | Нормировка потерь | среднее по токенам микробатча, затем по накоплению | офиц. код |
+| Веса позиций блока | равные; абляция `train.loss_gamma=γ`: вес позиции i — exp(−i/γ), взвешенное среднее | статья, офиц. код; абляция — DFlash |
 | Формат экспорта | Qwen3-конфиг + `block_size`, `mask_token_id`, `modeling_orthrus.py` | офиц. чекпоинт |
 
 Отклонения, которых требует железо или которые не меняют алгоритм:
