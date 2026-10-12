@@ -1,3 +1,4 @@
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -5,29 +6,43 @@ from orthrus.objective import (
     FusedLinearForwardKL,
     model_states,
     orthrus_loss,
+    position_weights,
     reference_states,
     sample_anchors,
     supervision_mask,
 )
 
 
-def test_fused_kl_matches_autograd_reference():
+@pytest.mark.parametrize("weighted", [False, True])
+def test_fused_kl_matches_autograd_reference(weighted):
     torch.manual_seed(0)
     student = torch.randn(37, 16, requires_grad=True)
     teacher = torch.randn(11, 16)
     index = torch.randint(0, 11, (37,)).sort().values  # rows share teacher positions
     weight = torch.randn(50, 16)
-    total, agree = FusedLinearForwardKL.apply(student, teacher, index, weight, 8, False)
+    row_weight = torch.rand(37) if weighted else None
+    total, kl_rows, agree = FusedLinearForwardKL.apply(
+        student, teacher, index, weight, 8, False, row_weight
+    )
     total.backward()
 
     ref_student = student.detach().clone().requires_grad_(True)
     log_ps = F.log_softmax(ref_student @ weight.t(), dim=-1)
     log_pt = F.log_softmax(teacher[index] @ weight.t(), dim=-1)
-    reference = F.kl_div(log_ps, log_pt, log_target=True, reduction="sum")  # KL(teacher||student)
+    rows = F.kl_div(log_ps, log_pt, log_target=True, reduction="none").sum(-1)  # KL(t||s) per row
+    reference = (rows * row_weight).sum() if weighted else rows.sum()
     reference.backward()
     assert torch.allclose(total, reference, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(kl_rows, rows.detach(), rtol=1e-5, atol=1e-6)
     assert torch.allclose(student.grad, ref_student.grad, rtol=1e-4, atol=1e-6)
     assert torch.equal(agree, log_ps.argmax(-1) == log_pt.argmax(-1))
+
+
+def test_position_weights_decay_from_one():
+    assert position_weights(32, 0.0) is None  # uniform (paper)
+    w = position_weights(32, 4.0)
+    assert w.shape == (31,) and w[0] == 1 and (w[1:] < w[:-1]).all()
+    assert torch.isclose(w[4], torch.exp(torch.tensor(-1.0)))
 
 
 def _batch(model, rows=2, seq_len=48, slots=6, seed=0):
@@ -49,12 +64,13 @@ def test_functional_views_match_module_path(tiny_model):
     assert torch.allclose(student, ref_student, atol=1e-5)
 
 
-def test_loss_matches_undeduplicated_reference(tiny_model):
+@pytest.mark.parametrize("gamma", [0.0, 2.0])
+def test_loss_matches_undeduplicated_reference(tiny_model, gamma):
     """Shared teacher rows and sorted chunks change nothing: same loss and gradients as the plain
-    per-position KL over the module path."""
+    per-position KL (or its position-weighted mean) over the module path."""
     ids, mask, anchors, valid = _batch(tiny_model, slots=12)  # many overlapping blocks
     k = tiny_model.config.block_size
-    loss, stats = orthrus_loss(tiny_model, ids, mask, anchors, valid, kl_chunk_size=16)
+    loss, stats = orthrus_loss(tiny_model, ids, mask, anchors, valid, kl_chunk_size=16, gamma=gamma)
     loss.backward()
     grads = {n: p.grad.clone() for n, p in tiny_model.named_parameters() if p.grad is not None}
     tiny_model.zero_grad(set_to_none=True)
@@ -67,10 +83,16 @@ def test_loss_matches_undeduplicated_reference(tiny_model):
     weight = tiny_model.lm_head.weight
     log_ps = F.log_softmax(student[keep] @ weight.t(), dim=-1)
     log_pt = F.log_softmax(teacher.view_as(student)[keep] @ weight.t(), dim=-1)
-    reference = F.kl_div(log_ps, log_pt, log_target=True, reduction="sum") / keep.sum()
+    rows = F.kl_div(log_ps, log_pt, log_target=True, reduction="none").sum(-1)
+    offsets = torch.arange(k - 1).expand_as(keep)[keep]
+    w = torch.exp(-offsets / gamma) if gamma else torch.ones_like(rows)
+    reference = (rows * w).sum() / w.sum()
     reference.backward()
     assert stats["tokens"] == keep.sum()
     assert torch.allclose(loss, reference, rtol=1e-5, atol=1e-6)
+    assert torch.allclose(stats["kl_sum"], rows.sum(), rtol=1e-5)  # unweighted for any gamma
+    by_offset = torch.zeros(k - 1).index_add_(0, offsets, rows.detach())
+    assert torch.allclose(stats["kl_by_offset"], by_offset, rtol=1e-5, atol=1e-6)
     assert stats["agree"] == (log_ps.argmax(-1) == log_pt.argmax(-1)).sum()
     for name, param in tiny_model.named_parameters():
         if param.grad is not None:

@@ -47,6 +47,8 @@ class TrainConfig:
     weight_decay: float = 0.0  # official code
     max_grad_norm: float = 1.0  # paper
     num_anchor_blocks: int = 256  # blocks per sequence, paper
+    loss_gamma: float = 0.0  # ablation: block position i weighted exp(-i/gamma) (DFlash's loss
+    # decay); 0: uniform token mean (paper, official code)
     kl_chunk_size: int = 2048  # rows per vocabulary projection chunk in the KL loss
     activation_checkpointing: bool = False
     compile: bool = True  # GPU: torch.compile each decoder layer and the fused KL (same math)

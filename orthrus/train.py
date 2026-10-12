@@ -56,6 +56,16 @@ OPERATIONAL = {  # train settings that may change when a run continues (no effec
     "activation_checkpointing",
 }
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+SUMMED_STATS = (  # orthrus_loss statistics summed over micro-batches
+    "kl_sum",
+    "weighted_kl_sum",
+    "weight_sum",
+    "tokens",
+    "agree",
+    "kl_by_offset",
+    "agree_by_offset",
+    "tokens_by_offset",
+)
 
 
 def lr_scale(step: int, warmup: int, total: int, min_ratio: float) -> float:
@@ -76,6 +86,8 @@ def recipe(cfg: Config) -> dict:
     """The settings that define a run's computation (model, data, optimization)."""
     model = {k: v for k, v in dataclasses.asdict(cfg.model).items() if k != "attn_implementation"}
     train = {k: v for k, v in dataclasses.asdict(cfg.train).items() if k not in OPERATIONAL}
+    if not train["loss_gamma"]:  # uniform loss: same recipe as checkpoints from before the option
+        del train["loss_gamma"]
     sections = {"model": model, "data": dataclasses.asdict(cfg.data), "train": train}
     return json.loads(json.dumps(sections))  # tuples as lists, like the saved JSON state
 
@@ -107,13 +119,17 @@ def check_teacher(cfg: Config, manifest: dict) -> None:
         )
 
 
-def offset_metrics(prefix: str, agree: torch.Tensor, tokens: torch.Tensor) -> dict:
-    """Top-1 agreement with the teacher per block offset, and the implied acceptance length if
-    drafts were accepted while consecutive offsets agree (a teacher-forced, optimistic proxy)."""
-    rate = (agree.double() / tokens.clamp_min(1).double()).cpu()
-    metrics = {
-        f"{prefix}/agree_k{k}": rate[k - 1].item() for k in REPORTED_OFFSETS if k <= len(rate)
-    }
+def offset_metrics(prefix: str, sums: dict) -> dict:
+    """Top-1 agreement with the teacher and KL per block offset, and the implied acceptance length
+    if drafts were accepted while consecutive offsets agree (a teacher-forced, optimistic proxy)."""
+    tokens = sums["tokens_by_offset"].clamp_min(1).double()
+    rate = (sums["agree_by_offset"].double() / tokens).cpu()
+    kl = (sums["kl_by_offset"].double() / tokens).cpu()
+    metrics = {}
+    for k in REPORTED_OFFSETS:
+        if k <= len(rate):
+            metrics[f"{prefix}/agree_k{k}"] = rate[k - 1].item()
+            metrics[f"{prefix}/kl_k{k}"] = kl[k - 1].item()
     metrics[f"{prefix}/acceptance_proxy"] = torch.cumprod(rate, 0).sum().item()
     return metrics
 
@@ -142,16 +158,20 @@ def evaluation_loss(model, ids, mask, cfg: Config, device: torch.device) -> dict
                 cfg.train.kl_chunk_size,
                 cfg.train.compile,
                 cfg.train.flex_kernel_options,
+                cfg.train.loss_gamma,
             )
-        for key in ("kl_sum", "tokens", "agree", "agree_by_offset", "tokens_by_offset"):
+        for key in SUMMED_STATS:
             sums[key] = sums[key] + stats[key]
     model.train(was_training)
     tokens = sums["tokens"].clamp_min(1)
-    return {
+    metrics = {
         "eval/kl": (sums["kl_sum"] / tokens).item(),
         "eval/top1_agreement": (sums["agree"] / tokens).item(),
-        **offset_metrics("eval", sums["agree_by_offset"], sums["tokens_by_offset"]),
+        **offset_metrics("eval", sums),
     }
+    if cfg.train.loss_gamma:
+        metrics["eval/weighted_kl"] = (sums["weighted_kl_sum"] / sums["weight_sum"]).item()
+    return metrics
 
 
 class StopFlag:
@@ -332,9 +352,10 @@ def train(cfg: Config, run_dir: Path, local_root: Path) -> None:
                         t.kl_chunk_size,
                         t.compile,
                         t.flex_kernel_options,
+                        t.loss_gamma,
                     )
                 (loss / accum).backward()
-                for key in ("kl_sum", "tokens", "agree", "agree_by_offset", "tokens_by_offset"):
+                for key in SUMMED_STATS:
                     window[key] = window[key] + stats[key]
                 window["valid_anchors"] += stats["valid_anchors"] / accum
                 window["input_tokens"] += batch_ids.numel()
@@ -367,10 +388,12 @@ def train(cfg: Config, run_dir: Path, local_root: Path) -> None:
                     "perf/seconds_per_step": elapsed / window_steps,
                     "perf/input_tokens_per_second": window["input_tokens"].item() / elapsed,
                     "perf/eta_hours": (total_steps - step) * elapsed / window_steps / 3600,
-                    **offset_metrics(
-                        "train", window["agree_by_offset"], window["tokens_by_offset"]
-                    ),
+                    **offset_metrics("train", window),
                 }
+                if t.loss_gamma:  # the optimized objective; train/loss stays the plain KL
+                    metrics["train/weighted_loss"] = (
+                        window["weighted_kl_sum"] / window["weight_sum"]
+                    ).item()
                 if device.type == "cuda":
                     metrics["perf/max_memory_gb"] = torch.cuda.max_memory_allocated() / 2**30
                     metrics.update(gpu_stats())

@@ -6,6 +6,12 @@ them, and every masked position is distilled to the AR distribution at the same 
     KL( p_AR(. | x_<=a+i) || p_diff(. | x_<a, block) ),  i = 0 .. K-2
 (the last block position has no target inside the block, as in the official code and inference).
 
+Optional position weighting (ablation, off by default; the paper and official code use a plain
+token mean): position i is weighted by w_i = exp(-i / gamma), so the first drafted token has
+weight 1, and the loss is the weighted mean sum(w * KL) / sum(w). Same form as DFlash (arXiv
+2602.06036, Sec. 4.2): an early mistake rejects the whole tail of the draft, so early positions
+matter most for the acceptance length.
+
 Speed (same math, tests compare against the module path `reference_states`):
 - both passes run as plain functions over the modules' weights, compiled per decoder layer on GPU,
   so norms, RoPE, SwiGLU and FlexAttention fuse into one graph per layer;
@@ -65,6 +71,14 @@ def supervision_mask(
     targets = anchors[:, :, None] + torch.arange(1, block_size, device=anchors.device)
     keep = assistant_mask.gather(1, targets.flatten(1)).view_as(targets)
     return keep & valid[:, :, None]
+
+
+def position_weights(block_size: int, gamma: float, device=None) -> torch.Tensor | None:
+    """Loss weight of block position i = 0 .. K-2 (the token i+1 after the anchor): exp(-i/gamma),
+    DFlash's w_k = exp(-(k-1)/gamma) with k = i+1. None for gamma <= 0 (uniform, paper)."""
+    if gamma <= 0:
+        return None
+    return torch.exp(-torch.arange(block_size - 1, device=device, dtype=torch.float32) / gamma)
 
 
 # --- Both views as functions of the weights (Qwen3 math, as in modeling_orthrus.py) -------------
@@ -299,16 +313,22 @@ def _logits(hidden: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return (hidden @ weight.t()).float()
 
 
-def kl_chunk(teacher_logits, student_logits, index, grad_dtype: torch.dtype | None):
-    """KL(p_teacher[index[r]] || p_student[r]) summed over the rows r of one chunk, top-1
-    agreement per row and, if grad_dtype is set, p_student - p_teacher (the gradient of the KL
-    sum w.r.t. the student logits). One fused pass per tensor under torch.compile."""
+def kl_chunk(teacher_logits, student_logits, index, row_weight, grad_dtype: torch.dtype | None):
+    """KL(p_teacher[index[r]] || p_student[r]) for every row r of one chunk, top-1 agreement per
+    row and, if grad_dtype is set, w_r * (p_student - p_teacher) (the gradient of the weighted KL
+    sum w.r.t. the student logits; w_r = 1 if row_weight is None). One fused pass per tensor
+    under torch.compile."""
     log_pt = teacher_logits.log_softmax(-1)[index]
     log_ps = student_logits.log_softmax(-1)
     p_t = log_pt.exp()
-    kl = (p_t * (log_pt - log_ps)).sum()
+    kl = (p_t * (log_pt - log_ps)).sum(-1)
     agree = student_logits.argmax(-1) == teacher_logits.argmax(-1)[index]
-    diff = (log_ps.exp() - p_t).to(grad_dtype) if grad_dtype is not None else None
+    diff = None
+    if grad_dtype is not None:
+        diff = log_ps.exp() - p_t
+        if row_weight is not None:
+            diff = diff * row_weight[:, None]
+        diff = diff.to(grad_dtype)
     return kl, agree, diff
 
 
@@ -316,19 +336,22 @@ _compiled_kl_chunk = torch.compile(kl_chunk)  # static vocabulary; row counts ma
 
 
 class FusedLinearForwardKL(torch.autograd.Function):
-    """sum_r KL(softmax(W teacher[index[r]]) || softmax(W student[r])) over student rows.
+    """sum_r w_r KL(softmax(W teacher[index[r]]) || softmax(W student[r])) over student rows
+    (w_r = row_weight[r], or 1 if row_weight is None).
 
     index maps every student row to its teacher row and must be non-decreasing, so each chunk of
     student rows needs one contiguous slice of teacher rows: a teacher row shared by several
     blocks is projected once (twice at most, on a chunk boundary). The gradient w.r.t. the
-    student rows, (p_student - p_teacher) @ W, is computed in the forward pass, so vocabulary
-    logits are never stored for backward. Also returns per-row top-1 agreement.
+    student rows, w_r (p_student - p_teacher) @ W, is computed in the forward pass, so vocabulary
+    logits are never stored for backward. Also returns the unweighted KL and the top-1
+    agreement of every row.
     """
 
     @staticmethod
-    def forward(ctx, student, teacher, index, weight, chunk_size: int, compiled: bool):
+    def forward(ctx, student, teacher, index, weight, chunk_size: int, compiled: bool, row_weight):
         rows = student.shape[0]
         total = torch.zeros((), dtype=torch.float32, device=student.device)
+        kl_rows = torch.zeros(rows, dtype=torch.float32, device=student.device)
         agree = torch.zeros(rows, dtype=torch.bool, device=student.device)
         grad = torch.empty_like(student) if ctx.needs_input_grad[0] else None
         chunk = _compiled_kl_chunk if compiled and student.is_cuda else kl_chunk
@@ -343,26 +366,30 @@ class FusedLinearForwardKL(torch.autograd.Function):
         for start, end, first, last in zip(
             starts, ends, edges[: len(starts)], edges[len(starts) :], strict=True
         ):
+            chunk_weight = row_weight[start:end] if row_weight is not None else None
             inputs = (
                 _logits(teacher[first : last + 1], weight),
                 _logits(student[start:end], weight),
                 index[start:end] - first,
+                chunk_weight,
             )
             if chunk is not kl_chunk:  # one graph for all chunks, specialized to the vocabulary
                 for tensor in inputs:
-                    torch._dynamo.maybe_mark_dynamic(tensor, 0)
+                    if tensor is not None:
+                        torch._dynamo.maybe_mark_dynamic(tensor, 0)
             kl, agree[start:end], diff = chunk(*inputs, weight.dtype if grad is not None else None)
-            total += kl
+            kl_rows[start:end] = kl
+            total += (kl * chunk_weight).sum() if chunk_weight is not None else kl.sum()
             if grad is not None:
                 grad[start:end] = (diff @ weight).to(grad.dtype)
         ctx.save_for_backward(grad)
-        ctx.mark_non_differentiable(agree)
-        return total, agree
+        ctx.mark_non_differentiable(kl_rows, agree)
+        return total, kl_rows, agree
 
     @staticmethod
-    def backward(ctx, grad_total, _grad_agree):
+    def backward(ctx, grad_total, _grad_kl_rows, _grad_agree):
         (grad,) = ctx.saved_tensors
-        return grad * grad_total.to(grad.dtype), None, None, None, None, None
+        return grad * grad_total.to(grad.dtype), None, None, None, None, None, None
 
 
 def orthrus_loss(
@@ -374,11 +401,14 @@ def orthrus_loss(
     kl_chunk_size: int,
     compiled: bool = False,
     kernel_options: dict | None = None,
+    gamma: float = 0.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Mean forward KL over supervised block positions of a micro-batch (official: token mean).
+    """Mean forward KL over supervised block positions of a micro-batch (official: token mean);
+    with gamma > 0 the weighted mean with position weights exp(-i/gamma) (position_weights).
 
-    Returns the loss and detached statistics: supervised token count, top-1 agreement with the
-    teacher (overall and per block offset) and the fraction of valid anchor slots.
+    Returns the loss and detached statistics: supervised token count, unweighted KL sum (overall
+    and per block offset), weighted KL and weight sums, top-1 agreement with the teacher (overall
+    and per block offset) and the fraction of valid anchor slots.
     """
     block_size = model.config.block_size
     batch, seq_len = input_ids.shape
@@ -393,22 +423,31 @@ def orthrus_loss(
     targets = targets + seq_len * torch.arange(batch, device=anchors.device)[:, None, None]
     positions, index = torch.unique(targets[keep], return_inverse=True)
     order = torch.argsort(index, stable=True)
-    total, agree = FusedLinearForwardKL.apply(
+    offsets = torch.arange(block_size - 1, device=keep.device).expand_as(keep)[keep][order]
+    weights = position_weights(block_size, gamma, keep.device)
+    row_weight = weights[offsets] if weights is not None else None
+    total, kl_rows, agree = FusedLinearForwardKL.apply(
         student[keep][order],
         teacher.flatten(0, 1)[positions].to(student.dtype),
         index[order],
         model.lm_head.weight,
         kl_chunk_size,
         compiled,
+        row_weight,
     )
     count = keep.sum()
-    offsets = torch.arange(block_size - 1, device=keep.device).expand_as(keep)[keep][order]
+    norm = row_weight.sum() if row_weight is not None else count.float()
     stats = {
         "tokens": count.detach(),
-        "kl_sum": total.detach(),
+        "kl_sum": kl_rows.sum(),  # unweighted: comparable across gamma
+        "weighted_kl_sum": total.detach(),
+        "weight_sum": norm.detach(),
         "agree": agree.sum(),
+        "kl_by_offset": torch.zeros(block_size - 1, device=keep.device).index_add_(
+            0, offsets, kl_rows
+        ),
         "agree_by_offset": torch.bincount(offsets[agree], minlength=block_size - 1),
         "tokens_by_offset": torch.bincount(offsets, minlength=block_size - 1),
         "valid_anchors": valid.float().mean(),
     }
-    return total / count.clamp_min(1), stats
+    return total / norm.clamp_min(1e-6), stats

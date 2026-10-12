@@ -152,3 +152,15 @@ def test_stop_request_saves_and_exits(tmp_path, monkeypatch):
     segment = json.loads((run_dir / "run.json").read_text())["segments"][-1]
     assert segment["stop_reason"] == "stop requested" and segment["ended_at_step"] == 1
     assert deleted == ["runs/tiny/STOP"]
+
+
+def test_loss_gamma_enters_the_recipe_only_when_set():
+    """Checkpoints from before the option (uniform loss) still resume; a weighted run cannot
+    continue a uniform one or the other way round."""
+    from orthrus.config import load_config
+
+    assert "loss_gamma" not in train.recipe(load_config(overrides=["train.loss_gamma=0"]))["train"]
+    weighted = train.recipe(load_config(overrides=["train.loss_gamma=8"]))
+    assert weighted["train"]["loss_gamma"] == 8.0
+    changes = train.recipe_changes(train.recipe(load_config()), weighted)
+    assert changes == {"train.loss_gamma": (None, 8.0)}
