@@ -2,7 +2,7 @@ import pytest
 import torch
 from transformers import Qwen3Config
 
-from orthrus.modeling_orthrus import OrthrusLM, copy_diff_from_ar, freeze_to_diffusion
+from src.model import OrthrusLM, copy_diff_from_ar, freeze_to_diffusion
 
 VOCAB = 512
 MASK_TOKEN = VOCAB - 1

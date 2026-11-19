@@ -1,0 +1,26 @@
+# bash scripts/prepare.sh configs/dataset-qwen3-0.6b.yaml
+data_dir: data
+
+model:
+  base: Qwen/Qwen3-0.6B
+  revision: c1899de289a04d12100db370d81485cdf75e47ca
+
+data:
+  dataset: nemotron-v2-qwen3-0.6b
+
+datagen:
+  source: nvidia/Nemotron-Post-Training-Dataset-v2
+  source_revision: 5c89e01dd720ae0f4058445ed49c5fb68a03c76e
+  domains: [math, code, chat]
+  samples_per_domain: 175000
+  eval_prompts_per_domain: 64
+  max_prompt_tokens: 2048
+  max_new_tokens: 2048
+  shard_size: 20000
+  gpu_memory_utilization: 0.9
+  max_num_seqs: 512
+  seed: 42
+
+hf:
+  bucket: null  # ORTHRUS_BUCKET from .env
+  upload: true

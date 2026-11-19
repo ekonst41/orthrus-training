@@ -1,6 +1,6 @@
 # Third-party notices
 
-`orthrus/modeling_orthrus.py` is adapted from the official Orthrus implementation
+`src/model.py` is adapted from the official Orthrus implementation
 (https://github.com/chiennv2000/orthrus), distributed under the following license:
 
 ```text

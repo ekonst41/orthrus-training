@@ -2,7 +2,7 @@ import torch
 from conftest import MASK_TOKEN, make_tiny_model
 from torch.nn.attention.flex_attention import flex_attention
 
-from orthrus import modeling_orthrus as mo
+from src import model as mo
 
 
 def test_block_mask_matches_definition():

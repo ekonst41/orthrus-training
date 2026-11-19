@@ -1,13 +1,15 @@
 import pytest
 import torch
 import torch.nn.functional as F
+from reference import reference_states
 
-from orthrus.objective import (
+from src.train.loss import (
     FusedLinearForwardKL,
+    draft_loss,
+    loss_ce,
     model_states,
     orthrus_loss,
     position_weights,
-    reference_states,
     sample_anchors,
     supervision_mask,
 )
@@ -152,3 +154,31 @@ def test_loss_trains_only_diffusion_parameters(tiny_model):
     assert all(torch.isfinite(g).all() for g in grads.values())
     assert stats["tokens"] == stats["tokens_by_offset"].sum()
     assert 0 <= stats["agree"] <= stats["tokens"]
+
+
+def test_chunked_ce_matches_dense_loss_and_gradient():
+    torch.manual_seed(4)
+    hidden = torch.randn(13, 5, requires_grad=True)
+    labels = torch.randint(0, 11, (13,))
+    weight, row_weight = torch.randn(11, 5), torch.rand(13)
+    loss, rows, matches = loss_ce(hidden, labels, weight, 4, row_weight)
+    logits = hidden @ weight.T
+    reference = F.cross_entropy(logits, labels, reduction="none")
+    torch.testing.assert_close(rows, reference)
+    assert torch.equal(matches, logits.argmax(-1) == labels)
+    reference_grad = torch.autograd.grad((reference * row_weight).sum(), hidden)[0]
+    loss.backward()
+    torch.testing.assert_close(hidden.grad, reference_grad)
+
+
+def test_orthrus_ce_keeps_next_token_alignment(tiny_model):
+    ids, mask, anchors, valid = _batch(tiny_model)
+    block_size = tiny_model.config.block_size
+    student, _ = model_states(tiny_model, ids, anchors)
+    keep = supervision_mask(mask, anchors, valid, block_size)
+    hidden = student.reshape(*anchors.shape, block_size, -1)[:, :, :-1][keep]
+    target_pos = anchors.unsqueeze(-1) + torch.arange(1, block_size)
+    labels = ids.gather(1, target_pos.flatten(1)).view_as(target_pos)[keep]
+    expected = F.cross_entropy(tiny_model.lm_head(hidden), labels)
+    loss, _ = draft_loss(tiny_model, ids, mask, anchors, valid, 16, loss_type="ce")
+    torch.testing.assert_close(loss, expected)

@@ -1,13 +1,41 @@
-# Tool settings only. Dependencies live in requirements/*.in (locks: requirements/*.txt).
+[build-system]
+requires = ["setuptools>=78"]
+build-backend = "setuptools.build_meta"
 
-[tool.ruff]
-line-length = 100
-target-version = "py310"
+[project]
+name = "orthrus-training"
+version = "0.1.0"
+description = "Minimal Qwen3 Orthrus dataset, training and speed evaluation pipeline"
+requires-python = ">=3.12"
+dependencies = [
+    "torch==2.13.0",
+    "transformers==5.17.0",
+    "huggingface_hub>=1.30,<2",
+    "datasets>=5,<6",
+    "numpy>=2,<3",
+    "pyarrow>=20,<30",
+    "safetensors>=0.6,<1",
+    "pyyaml>=6,<7",
+]
 
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP"]
+[project.optional-dependencies]
+datagen = ["vllm==0.31.0"]
+notebooks = ["jupyterlab>=4,<5", "pandas>=2,<4", "matplotlib>=3.8,<4", "ipywidgets>=8,<9"]
+dev = ["pytest>=8,<10", "ruff>=0.15,<1", "nbformat>=5,<6"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "deprecated*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", "tests"]
 filterwarnings = ["ignore::UserWarning:torch.*", "ignore::DeprecationWarning:torch.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = ["deprecated", "notebooks"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
